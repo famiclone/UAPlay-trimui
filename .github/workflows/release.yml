@@ -73,13 +73,30 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -eu
+          for draft_tag in $(gh release list --repo "$GITHUB_REPOSITORY" --json tagName,isDraft --jq '.[] | select(.isDraft == true) | .tagName'); do
+            if [ "$draft_tag" = "$RELEASE_TAG" ] || printf '%s' "$draft_tag" | grep -q '^untagged-'; then
+              gh release delete "$draft_tag" --yes --repo "$GITHUB_REPOSITORY" || true
+            fi
+          done
+
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" UAPlay.pak.zip SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft=false \
+              --prerelease=false \
+              --latest \
+              --title "UAPlay ${RELEASE_TAG#v} — TrimUI Brick & Smart Pro (NextUI)" \
+              --notes-file .release/RELEASE_NOTES.md
           else
             gh release create "$RELEASE_TAG" \
               UAPlay.pak.zip \
               SHA256SUMS.txt \
               --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --latest \
               --title "UAPlay ${RELEASE_TAG#v} — TrimUI Brick & Smart Pro (NextUI)" \
               --notes-file .release/RELEASE_NOTES.md
           fi
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '{html_url, draft, assets: [.assets[].name]}'
