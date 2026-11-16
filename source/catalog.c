@@ -13,12 +13,12 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__TRIMUI__)
 #include <SDL.h>
 #endif
 
-#define TMDB_KEY_PATH "sdmc:/switch/uaplay/tmdb.key"
-#define TMDB_LEGACY_KEY_PATH "sdmc:/switch/lampa-nx/tmdb.key"
+#define TMDB_KEY_PATH UAPLAY_DATA_DIR "/tmdb.key"
+#define TMDB_LEGACY_KEY_PATH UAPLAY_DATA_ROOT "/lampa-nx/tmdb.key"
 /* The release workflow injects this header from a GitHub Actions secret.
    Keep credentials out of the public source tree. */
 #if defined(__has_include)
@@ -38,12 +38,12 @@ static void json_field(const char *object,const char *end,const char *key,
                        char *value,size_t size);
 
 #define COUNTRY_CACHE_LIMIT 4096
-#define COUNTRY_CACHE_PATH "sdmc:/switch/uaplay/country_cache.tsv"
-#define COUNTRY_CACHE_TMP "sdmc:/switch/uaplay/country_cache.tmp"
+#define COUNTRY_CACHE_PATH UAPLAY_DATA_DIR "/country_cache.tsv"
+#define COUNTRY_CACHE_TMP UAPLAY_DATA_DIR "/country_cache.tmp"
 typedef struct { int id,series,allowed; } CountryCacheEntry;
 static CountryCacheEntry country_cache[COUNTRY_CACHE_LIMIT];
 static int country_cache_count,country_cache_evict;
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__TRIMUI__)
 static SDL_mutex *country_cache_mutex;
 #define COUNTRY_LOCK() do { if(country_cache_mutex) SDL_LockMutex(country_cache_mutex); } while(0)
 #define COUNTRY_UNLOCK() do { if(country_cache_mutex) SDL_UnlockMutex(country_cache_mutex); } while(0)
@@ -56,7 +56,7 @@ static SDL_mutex *country_cache_mutex;
    tears down HTTPS/TLS sockets. Eden's socket emulation can eventually fail
    new connections even though existing poster requests still work. Keep
    one reusable handle per calling thread, never shared concurrently. */
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__TRIMUI__)
 static SDL_threadID catalog_ui_thread;
 static CURL *catalog_connections[2];
 static void country_cache_load(void){
@@ -73,7 +73,7 @@ static void country_cache_load(void){
     fclose(file);
 }
 static void country_cache_save(void){
-    mkdir("sdmc:/switch/uaplay",0777);
+    uaplay_ensure_data_dirs();
     FILE *file=fopen(COUNTRY_CACHE_TMP,"w");
     if(!file)return;
     for(int i=0;i<country_cache_count;i++)
@@ -139,7 +139,10 @@ static void request_options(CURL *curl, const char *url, Response *r,
     }else curl_easy_setopt(curl, CURLOPT_USERAGENT, "Lampa-nx/0.2 (Nintendo Switch)");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, on_data);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, r);
-#ifdef __SWITCH__
+#ifdef UAPLAY_CA_BUNDLE
+    curl_easy_setopt(curl, CURLOPT_CAINFO, UAPLAY_CA_BUNDLE);
+#endif
+#if defined(__SWITCH__) || defined(__TRIMUI__)
     /* Console/Eden socket layers can advertise IPv6 without routing it. */
     curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
     curl_easy_setopt(curl, CURLOPT_MAXCONNECTS, 4L);
@@ -160,7 +163,7 @@ static int transient_network_error(CURLcode result) {
    timeout, and retry behaviour as GET, including on Switch. */
 static char *request_form(const char *url, const char *post_data,
                           const char *referer, char *error, int error_size) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__TRIMUI__)
     CURL **slot = catalog_connection_slot();
     if (!*slot) *slot = curl_easy_init();
     CURL *curl = *slot;
@@ -197,7 +200,7 @@ static char *request_form(const char *url, const char *post_data,
         if (r.data) r.data[0] = 0;
         curl_easy_cleanup(curl);
         curl = curl_easy_init();
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__TRIMUI__)
         *slot = curl;
 #endif
         if (curl) {
@@ -215,7 +218,7 @@ static char *request_form(const char *url, const char *post_data,
     }
     long status = 0;
     if (curl) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__TRIMUI__)
     if (result != CURLE_OK && curl) {
         curl_easy_cleanup(curl);
         *slot = NULL;
@@ -441,11 +444,20 @@ int subdl_search(const Movie *movie,int season,int episode,SubdlSubtitle *out,
     }
     char key[256]={0};
     FILE *file=fopen(SUBDL_KEY_PATH,"r");
+#ifdef __TRIMUI__
+    if(!file)file=fopen("subdl.key","r");
+    if(!file)file=fopen("/mnt/SDCARD/uaplay/subdl.key","r");
+#endif
     if(file){fgets(key,sizeof(key),file);fclose(file);}
     key[strcspn(key,"\r\n \t")]=0;
     if(!key[0]){
+#ifdef __TRIMUI__
+        snprintf(error,error_size,"%s",TR("Додайте ключ у Tools/tg5040/UAPlay.pak/subdl.key на SD-карті.",
+                                          "Add your key to Tools/tg5040/UAPlay.pak/subdl.key on the SD card."));
+#else
         snprintf(error,error_size,"%s",TR("Додайте ключ у /switch/uaplay/subdl.key на SD-карті.",
                                           "Add your key to /switch/uaplay/subdl.key on the SD card."));
+#endif
         return 0;
     }
     int count=0;
@@ -506,8 +518,7 @@ int subdl_download(const SubdlSubtitle *subtitle,char *path,int path_size,
                                                 "SubDL returned an invalid subtitle file."));
     }
     if(ok){
-        mkdir(UAPLAY_DATA_ROOT,0777);
-        mkdir(UAPLAY_DATA_DIR,0777);
+        uaplay_ensure_data_dirs();
         mkdir(SUBDL_CACHE,0777);
         char temporary[SUBDL_FILE_SIZE+5];
         snprintf(temporary,sizeof(temporary),"%s.tmp",path);
@@ -536,8 +547,8 @@ static int already_released(const char *release_date,const char *today){
 static char *read_offline_catalog(const char *category) {
     const char *name = !strcmp(category, "series") ? "series" :
                        !strcmp(category, "top") ? "top" : "movies";
-    char path[80];
-    snprintf(path, sizeof(path), "romfs:/%s.json", name);
+    char path[160];
+    snprintf(path, sizeof(path), UAPLAY_ROMFS "%s.json", name);
     FILE *file = fopen(path, "rb");
     if (!file) return NULL;
     if (fseek(file, 0, SEEK_END)) { fclose(file); return NULL; }
@@ -609,6 +620,10 @@ static int json_has_ru(const char *object,const char *end,const char *field){
 static void tmdb_key(char *key,size_t capacity){
     snprintf(key,capacity,"%s",UAPLAY_TMDB_BUILD_KEY);
     FILE *f=fopen(TMDB_KEY_PATH,"r");
+#ifdef __TRIMUI__
+    if(!f)f=fopen("tmdb.key","r");
+    if(!f)f=fopen("/mnt/SDCARD/uaplay/tmdb.key","r");
+#endif
     if(!f)f=fopen(TMDB_LEGACY_KEY_PATH,"r");
     if(f){
         char override[256]={0};
@@ -650,12 +665,13 @@ static void country_remember(const Movie *movie,int allowed){
 }
 
 static int country_allowed(const Movie *movie,const char *object,
-                           const char *end,const char *key){
+                           const char *end,const char *key,int offline_curated){
     int allowed=0;
     if(country_cached(movie,&allowed))return allowed;
     int ru=object?json_has_ru(object,end,movie->series?
                               "origin_country":"production_countries"):-1;
     if(ru<0){
+        if(offline_curated)return 1;
         if(!key || !key[0])return 0;
         char url[600],error[160]={0};
         snprintf(url,sizeof(url),"https://api.themoviedb.org/3/%s/%d?api_key=%s",
@@ -674,10 +690,10 @@ static int country_allowed(const Movie *movie,const char *object,
 
 int catalog_filter_countries(Movie *items,int count){
     char key[256];tmdb_key(key,sizeof(key));
-    if(!key[0])return 0;
+    if(!key[0])return count;
     int kept=0;
     for(int i=0;i<count;i++)
-        if(country_allowed(&items[i],NULL,NULL,key))items[kept++]=items[i];
+        if(country_allowed(&items[i],NULL,NULL,key,0))items[kept++]=items[i];
     return kept;
 }
 
@@ -763,85 +779,101 @@ int catalog_load_page_sorted(const char *category, const char *query, int page,
     if (page<1 || page>500) return 0;
     char key[256];
     tmdb_key(key,sizeof(key));
-    if (!key[0]) {
-        snprintf(error,error_size,TR("TMDB: додайте /switch/uaplay/tmdb.key на SD-карту","TMDB: add /switch/uaplay/tmdb.key to the SD card"));
-        return 0;
-    }
-
-    const char *language=tmdb_language(ui_language());
-    char url[1800];
+    int searching=query && *query;
     char today[16]={0};
     if(sort_mode==2){
         time_t now=time(NULL);
         struct tm *calendar=localtime(&now);
         if(calendar)strftime(today,sizeof(today),"%Y-%m-%d",calendar);
     }
-    int searching=query && *query;
-    char *q = searching ? encode(query) : NULL;
-    const char *movie_sort=sort_mode==1?"vote_average.desc":
-                           sort_mode==2?"primary_release_date.desc":"popularity.desc";
-    const char *tv_sort=sort_mode==1?"vote_average.desc":
-                        sort_mode==2?"first_air_date.desc":"popularity.desc";
-    const char *rating_filter=sort_mode==1?"&vote_count.gte=100":"";
-    if (q) {
-        snprintf(url, sizeof(url), "https://api.themoviedb.org/3/search/multi?api_key=%s&language=%s&include_adult=false&query=%s", key, language, q);
-    } else {
-        if (!strcmp(category,"cartoon_series"))
-            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/tv?api_key=%s&language=%s&sort_by=%s&with_genres=16%s",key,language,tv_sort,rating_filter);
-        else if (!strcmp(category,"anime"))
-            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/tv?api_key=%s&language=%s&sort_by=%s&with_genres=16&with_original_language=ja%s",key,language,tv_sort,rating_filter);
-        else if (!strcmp(category,"cartoons"))
-            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/movie?api_key=%s&language=%s&sort_by=%s&with_genres=16%s",key,language,movie_sort,rating_filter);
-        else if (!strncmp(category,"genre_",6))
-            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/movie?api_key=%s&language=%s&sort_by=%s&with_genres=%s%s",key,language,movie_sort,category+6,rating_filter);
-        else if (!strcmp(category,"films"))
-            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/movie?api_key=%s&language=%s&sort_by=%s%s",key,language,movie_sort,rating_filter);
-        else if (!strcmp(category,"series"))
-            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/tv?api_key=%s&language=%s&sort_by=%s%s",key,language,tv_sort,rating_filter);
-        else {
-            const char *path = !strcmp(category, "series") ? "trending/tv/week" :
-                               !strcmp(category, "top") ? "movie/top_rated" : "trending/movie/week";
-            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/%s?api_key=%s&language=%s", path, key, language);
-        }
-    }
-    free(q);
-    /* Discover endpoints accept an upper release-date bound. Without it,
-       sorting newest-first gives unreleased films and premieres priority. */
-    if(sort_mode==2 && today[0] && !searching){
-        int tv_category=!strcmp(category,"series") ||
-                        !strcmp(category,"cartoon_series") ||
-                        !strcmp(category,"anime");
-        int movie_category=!strcmp(category,"films") ||
-                           !strcmp(category,"cartoons") ||
-                           !strncmp(category,"genre_",6);
-        if(tv_category || movie_category){
-            size_t used=strlen(url);
-            snprintf(url+used,sizeof(url)-used,"&%s.lte=%s",
-                     tv_category?"first_air_date":"primary_release_date",today);
-        }
-    }
-    /* The TMDB API defaults to page 1. Explicitly request subsequent pages. */
-    size_t used=strlen(url);
-    if (used+24<sizeof(url))snprintf(url+used,sizeof(url)-used,"&page=%d",page);
-    char *json = request(url, error, error_size);
+    char *json = NULL;
     int offline_search=0;
     int offline_catalog=0;
-    if (!json) {
-        /* Never repeat the offline page in background pagination. */
+    if (!key[0]) {
         if(page>1)return 0;
         json = read_offline_catalog(category);
-        if (json) {
-            offline_catalog=1;
-            offline_search=searching;
-            if(searching)snprintf(error,error_size,
-                                  TR("Офлайн-пошук: лише збережені назви (TMDB недоступний)","Offline search: saved titles only (TMDB unavailable)"));
-            else snprintf(error,error_size,"Offline catalog (network unavailable): %s",category);
-        }else if(searching){
-            char reason[160];snprintf(reason,sizeof(reason),"%s",error);
-            snprintf(error,error_size,TR("Пошук TMDB недоступний: %.155s","TMDB search unavailable: %.155s"),reason);
+        if (!json) {
+#ifdef __TRIMUI__
+            snprintf(error,error_size,TR("TMDB: додайте ключ у Tools/tg5040/UAPlay.pak/tmdb.key","TMDB: add key to Tools/tg5040/UAPlay.pak/tmdb.key"));
+#else
+            snprintf(error,error_size,TR("TMDB: додайте /switch/uaplay/tmdb.key на SD-карту","TMDB: add /switch/uaplay/tmdb.key to the SD card"));
+#endif
             return 0;
-        }else return 0;
-    } else error[0] = 0;
+        }
+        offline_catalog=1;
+        offline_search=searching;
+#ifdef __TRIMUI__
+        snprintf(error,error_size,TR("Офлайн-каталог · для повного каталогу додайте Tools/tg5040/UAPlay.pak/tmdb.key","Offline catalog · add Tools/tg5040/UAPlay.pak/tmdb.key for live TMDB"));
+#else
+        snprintf(error,error_size,TR("TMDB: додайте /switch/uaplay/tmdb.key на SD-карту","TMDB: add /switch/uaplay/tmdb.key to the SD card"));
+#endif
+    } else {
+        const char *language=tmdb_language(ui_language());
+        char url[1800];
+        char *q = searching ? encode(query) : NULL;
+        const char *movie_sort=sort_mode==1?"vote_average.desc":
+                               sort_mode==2?"primary_release_date.desc":"popularity.desc";
+        const char *tv_sort=sort_mode==1?"vote_average.desc":
+                            sort_mode==2?"first_air_date.desc":"popularity.desc";
+        const char *rating_filter=sort_mode==1?"&vote_count.gte=100":"";
+        if (q) {
+            snprintf(url, sizeof(url), "https://api.themoviedb.org/3/search/multi?api_key=%s&language=%s&include_adult=false&query=%s", key, language, q);
+        } else {
+            if (!strcmp(category,"cartoon_series"))
+                snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/tv?api_key=%s&language=%s&sort_by=%s&with_genres=16%s",key,language,tv_sort,rating_filter);
+            else if (!strcmp(category,"anime"))
+                snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/tv?api_key=%s&language=%s&sort_by=%s&with_genres=16&with_original_language=ja%s",key,language,tv_sort,rating_filter);
+            else if (!strcmp(category,"cartoons"))
+                snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/movie?api_key=%s&language=%s&sort_by=%s&with_genres=16%s",key,language,movie_sort,rating_filter);
+            else if (!strncmp(category,"genre_",6))
+                snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/movie?api_key=%s&language=%s&sort_by=%s&with_genres=%s%s",key,language,movie_sort,category+6,rating_filter);
+            else if (!strcmp(category,"films"))
+                snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/movie?api_key=%s&language=%s&sort_by=%s%s",key,language,movie_sort,rating_filter);
+            else if (!strcmp(category,"series"))
+                snprintf(url, sizeof(url), "https://api.themoviedb.org/3/discover/tv?api_key=%s&language=%s&sort_by=%s%s",key,language,tv_sort,rating_filter);
+            else {
+                const char *path = !strcmp(category, "series") ? "trending/tv/week" :
+                                   !strcmp(category, "top") ? "movie/top_rated" : "trending/movie/week";
+                snprintf(url, sizeof(url), "https://api.themoviedb.org/3/%s?api_key=%s&language=%s", path, key, language);
+            }
+        }
+        free(q);
+        /* Discover endpoints accept an upper release-date bound. Without it,
+           sorting newest-first gives unreleased films and premieres priority. */
+        if(sort_mode==2 && today[0] && !searching){
+            int tv_category=!strcmp(category,"series") ||
+                            !strcmp(category,"cartoon_series") ||
+                            !strcmp(category,"anime");
+            int movie_category=!strcmp(category,"films") ||
+                               !strcmp(category,"cartoons") ||
+                               !strncmp(category,"genre_",6);
+            if(tv_category || movie_category){
+                size_t used=strlen(url);
+                snprintf(url+used,sizeof(url)-used,"&%s.lte=%s",
+                         tv_category?"first_air_date":"primary_release_date",today);
+            }
+        }
+        /* The TMDB API defaults to page 1. Explicitly request subsequent pages. */
+        size_t used=strlen(url);
+        if (used+24<sizeof(url))snprintf(url+used,sizeof(url)-used,"&page=%d",page);
+        json = request(url, error, error_size);
+        if (!json) {
+            /* Never repeat the offline page in background pagination. */
+            if(page>1)return 0;
+            json = read_offline_catalog(category);
+            if (json) {
+                offline_catalog=1;
+                offline_search=searching;
+                if(searching)snprintf(error,error_size,
+                                      TR("Офлайн-пошук: лише збережені назви (TMDB недоступний)","Offline search: saved titles only (TMDB unavailable)"));
+                else snprintf(error,error_size,"Offline catalog (network unavailable): %s",category);
+            }else if(searching){
+                char reason[160];snprintf(reason,sizeof(reason),"%s",error);
+                snprintf(error,error_size,TR("Пошук TMDB недоступний: %.155s","TMDB search unavailable: %.155s"),reason);
+                return 0;
+            }else return 0;
+        } else error[0] = 0;
+    }
     char total_pages[32]={0};
     json_field(json,json+strlen(json),"total_pages",total_pages,sizeof(total_pages));
     if(has_more && page<atoi(total_pages) && page<500)*has_more=1;
@@ -889,7 +921,7 @@ int catalog_load_page_sorted(const char *category, const char *query, int page,
         if (m.id && m.title[0] && strcmp(type, "person") &&
             (!offline_search || contains_title(m.title,query) ||
              contains_title(m.original,query)) &&
-            country_allowed(&m,p,end,offline_catalog?NULL:key))items[count++] = m;
+            country_allowed(&m,p,end,offline_catalog?NULL:key,offline_catalog))items[count++] = m;
         p = end;
     }
     free(json);

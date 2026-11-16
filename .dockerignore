@@ -1,0 +1,10 @@
+.git
+build
+dist
+romfs
+source
+tests
+*.pak
+*.zip
+*.nro
+*.elf

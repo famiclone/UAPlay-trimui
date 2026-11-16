@@ -1,5 +1,6 @@
 #include "movy_stream.h"
 #include "catalog.h"
+#include "platform.h"
 
 #include <arpa/inet.h>
 #include <curl/curl.h>
@@ -293,7 +294,10 @@ static void *relay_worker(void *opaque){
     curl_easy_setopt(curl,CURLOPT_ACCEPT_ENCODING,"");
     curl_easy_setopt(curl,CURLOPT_HTTP_VERSION,CURL_HTTP_VERSION_1_1);
     curl_easy_setopt(curl,CURLOPT_USERAGENT,"Mozilla/5.0 (Nintendo Switch; UAPlay/1.0)");
-#ifdef __SWITCH__
+#ifdef UAPLAY_CA_BUNDLE
+    curl_easy_setopt(curl,CURLOPT_CAINFO,UAPLAY_CA_BUNDLE);
+#endif
+#ifdef UAPLAY_CONSOLE
     curl_easy_setopt(curl,CURLOPT_IPRESOLVE,(long)CURL_IPRESOLVE_V4);
 #endif
     curl_easy_setopt(curl,CURLOPT_NOSIGNAL,1L);

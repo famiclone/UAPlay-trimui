@@ -1,4 +1,5 @@
 #include "posters.h"
+#include "platform.h"
 
 #include <SDL.h>
 #include <SDL_image.h>
@@ -21,7 +22,7 @@
 /* Fixed-size disk cache: at most 96 compressed posters, never an unbounded
    folder of thousands of image files from long TMDB searches. */
 #define POSTER_DISK_SLOTS 96
-#define POSTER_DISK_DIR "sdmc:/switch/uaplay/posters"
+#define POSTER_DISK_DIR UAPLAY_DATA_DIR "/posters"
 #define POSTER_DISK_MAGIC 0x55415032u
 
 typedef struct {
@@ -78,7 +79,7 @@ static ImageData disk_read(const char *path){
     ImageData result={0};
     if(!disk_mutex)return result;
     uint64_t hash=path_fingerprint(path);
-    char filename[128];disk_filename(hash,filename,sizeof(filename));
+    char filename[256];disk_filename(hash,filename,sizeof(filename));
     SDL_LockMutex(disk_mutex);
     FILE *file=fopen(filename,"rb");
     if(file){
@@ -102,7 +103,7 @@ static void disk_write(const char *path,const ImageData *image){
     if(!disk_mutex || !image->data || !image->used ||
        image->used>MAX_POSTER_BYTES)return;
     uint64_t hash=path_fingerprint(path);
-    char filename[128];disk_filename(hash,filename,sizeof(filename));
+    char filename[256];disk_filename(hash,filename,sizeof(filename));
     DiskHeader header={POSTER_DISK_MAGIC,(uint32_t)image->used,hash};
     SDL_LockMutex(disk_mutex);
     FILE *file=fopen(filename,"wb");
@@ -135,6 +136,9 @@ static ImageData download_image(const char *path,CURL *curl,int *ssl_failed){
     curl_easy_setopt(curl,CURLOPT_HTTP_VERSION,CURL_HTTP_VERSION_1_1);
     curl_easy_setopt(curl,CURLOPT_TCP_KEEPALIVE,1L);
     curl_easy_setopt(curl,CURLOPT_USERAGENT,"UAPlay-nx/1.0");
+#ifdef UAPLAY_CA_BUNDLE
+    curl_easy_setopt(curl,CURLOPT_CAINFO,UAPLAY_CA_BUNDLE);
+#endif
     curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,receive);
     curl_easy_setopt(curl,CURLOPT_WRITEDATA,&data);
     CURLcode result=curl_easy_perform(curl);
@@ -192,7 +196,7 @@ static int download_worker(void *opaque){
 }
 
 void posters_init(void){
-    mkdir("sdmc:/switch/uaplay",0777);
+    uaplay_ensure_data_dirs();
     mkdir(POSTER_DISK_DIR,0777);
     disk_mutex=SDL_CreateMutex();
     for(int i=0;i<POSTER_WORKERS;i++){

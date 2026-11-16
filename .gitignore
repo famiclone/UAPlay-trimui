@@ -1,3 +1,16 @@
+.DS_Store
+**/.DS_Store
 tmdb.key
 **/tmdb.key
+subdl.key
+**/subdl.key
 source/tmdb_build_key.h
+build/
+dist/
+uaplay
+UAPlay.pak/
+UAPlay.pak.zip
+*.o
+*.elf
+*.nacp
+*.nro

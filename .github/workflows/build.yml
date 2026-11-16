@@ -1,31 +1,57 @@
-name: Build native UAPlay with libmpv
+name: Build & Test (NextUI tg5040)
 
 on:
   push:
-    branches: [main, feature/vita-performance-downloads]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  switch:
+  test:
+    name: Smoke & Parser Tests
     runs-on: ubuntu-24.04
-    container: devkitpro/devkita64:latest
-    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - name: Verify preinstalled native player dependencies
+      - name: Install host test dependencies
         run: |
-          dkp-pacman -Q switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-libmpv switch-curl switch-pkg-config
-      - name: Embed TMDB key in native build
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+      - name: Run offline C smoke tests
+        run: make test
+
+  build:
+    name: Cross-compile UAPlay.pak (tg5040)
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build tg5040 cross-toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.tg5040
+          tags: uaplay-tg5040-builder:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Optionally embed TMDB API key from repository secret
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
           set -eu
-          if [ -z "$TMDB_API_KEY" ]; then
-            echo "::error::Repository secret TMDB_API_KEY is missing"
-            exit 1
+          if [ -z "${TMDB_API_KEY:-}" ]; then
+            echo "::notice::TMDB_API_KEY secret is not set; building with runtime tmdb.key support."
+            exit 0
           fi
           if [ "${#TMDB_API_KEY}" -ne 32 ]; then
-            echo "::error::TMDB_API_KEY must be a 32-character API v3 key"
+            echo "::error::TMDB_API_KEY must be a 32-character TMDB v3 API key"
             exit 1
           fi
           case "$TMDB_API_KEY" in
@@ -40,27 +66,28 @@ jobs:
             printf '#define UAPLAY_TMDB_BUILD_KEY "%s"\n' "$TMDB_API_KEY"
             printf '#endif\n'
           } > source/tmdb_build_key.h
-      - name: Install network-enabled FFmpeg and libmpv for Switch
+
+      - name: Build UAPlay.pak and UAPlay.pak.zip
+        run: |
+          docker run --rm \
+            -v "$PWD:/root/workspace" \
+            -w /root/workspace \
+            uaplay-tg5040-builder:latest \
+            make -j"$(nproc)" PLATFORM=trimui
+
+      - name: Verify ARM64 ELF and Pak archive
         run: |
           set -eu
-          base=https://github.com/xfangfang/wiliwili/releases/download/v0.1.0
-          curl -fL --retry 3 -o /tmp/switch-ffmpeg.pkg.tar.zst "$base/switch-ffmpeg-7.1-1-any.pkg.tar.zst"
-          curl -fL --retry 3 -o /tmp/switch-libmpv.pkg.tar.zst "$base/switch-libmpv-0.36.0-3-any.pkg.tar.zst"
-          dkp-pacman -U --noconfirm /tmp/switch-ffmpeg.pkg.tar.zst /tmp/switch-libmpv.pkg.tar.zst
-          dkp-pacman -Q switch-ffmpeg switch-libmpv
-      - name: Compile native NRO
-        run: |
-          curl -fL --retry 3 -o romfs/NotoSansCJKjp-Regular.otf https://raw.githubusercontent.com/googlefonts/noto-cjk/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf
-          export DEVKITPRO=/opt/devkitpro
-          export DEVKITA64=/opt/devkitpro/devkitA64
-          export PATH="$DEVKITA64/bin:$DEVKITPRO/tools/bin:$PATH"
-          find "$DEVKITPRO" \( -iname '*sdl*.pc' -o -iname '*mpv*.pc' -o -name 'SDL.h' \) -print
-          export PKG_CONFIG_PATH="$DEVKITPRO/portlibs/switch/lib/pkgconfig:$DEVKITPRO/libnx/lib/pkgconfig"
-          export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
-          make -j2
-          test -s UAPlay.nro
-      - uses: actions/upload-artifact@v4
+          test -s UAPlay.pak.zip
+          test -x dist/Tools/tg5040/UAPlay.pak/uaplay
+          test -x dist/Tools/tg5040/UAPlay.pak/launch.sh
+          file dist/Tools/tg5040/UAPlay.pak/uaplay | grep -q "ARM aarch64"
+          unzip -l UAPlay.pak.zip
+          sha256sum UAPlay.pak.zip
+
+      - name: Upload UAPlay.pak.zip artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: UAPlay-native
-          path: UAPlay.nro
+          name: UAPlay.pak
+          path: UAPlay.pak.zip
           if-no-files-found: error

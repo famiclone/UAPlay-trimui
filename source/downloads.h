@@ -17,7 +17,7 @@ typedef struct {
     int season,episode;     /* 0 for a film */
     char label[96];         /* episode name, empty for a film */
     char url[2048];         /* resolved stream address */
-    char file[160];         /* finished file */
+    char file[256];         /* finished file */
     int state;
     int permille;           /* progress, 0..1000; -1 while the size is unknown */
     unsigned long long bytes;

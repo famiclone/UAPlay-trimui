@@ -1,0 +1,13 @@
+{
+  "name": "UAPlay",
+  "type": "TOOL",
+  "description": "Україномовний відеокаталог фільмів, серіалів, мультфільмів та аніме (SDL2 + libmpv)",
+  "author": "famiclone, Small182",
+  "version": "0.5.1",
+  "repo_url": "https://github.com/famiclone/UAPlay-trimui",
+  "release_filename": "UAPlay.pak.zip",
+  "platforms": [
+    "tg5040"
+  ],
+  "launch": "launch.sh"
+}

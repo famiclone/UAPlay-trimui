@@ -1,128 +1,141 @@
-# UAPlay — Video Catalog for Nintendo Switch
+<div align="center">
 
-**UAPlay** is a native Nintendo Switch homebrew application featuring a Ukrainian-language catalog of movies, TV series, cartoons, animated series, and anime. It uses metadata from [TMDB](https://www.themoviedb.org/) and searches for available video streams from independent third-party sources.
+<img src="icon.png" alt="UAPlay Icon" width="128" height="128" />
 
-The application is written in C using **libnx, SDL2, and libmpv**. It is not a website running in a browser: its interface and playback do not require Chromium, WebKit, or TorrServer.
+# UAPlay — TrimUI Brick & Smart Pro (NextUI)
+
+**Native Ukrainian-language video catalog for movies, TV series, cartoons, and anime on TrimUI handhelds running NextUI (`tg5040`)**
+
+[![Build & Test](https://github.com/famiclone/UAPlay-trimui/actions/workflows/build.yml/badge.svg)](https://github.com/famiclone/UAPlay-trimui/actions/workflows/build.yml)
+[![Latest Release](https://img.shields.io/github/v/release/famiclone/UAPlay-trimui?label=Release&color=2ea44f)](https://github.com/famiclone/UAPlay-trimui/releases/latest)
+[![Platform](https://img.shields.io/badge/NextUI-tg5040-5865F2)](https://github.com/LoveRetro/NextUI)
+[![Devices](https://img.shields.io/badge/TrimUI-Brick%20%7C%20Smart%20Pro-00A8E8)](#supported-devices)
+[![Stack](https://img.shields.io/badge/C11-SDL2%20%2B%20GLES2%20%2B%20libmpv-orange)](#building-from-source)
 
 [Українська](README.md) | **English**
 
-> **Current release: [UAPlay 0.5.1](https://github.com/Small182/UAPlay-nx/releases/tag/UAPlay_0.5.1).** This project is under active development, and video availability depends on third-party services. A successful build does not guarantee that every video will play on a Switch.
+</div>
 
-## Download and installation
+---
 
-Download both files from the [0.5.1 release](https://github.com/Small182/UAPlay-nx/releases/tag/UAPlay_0.5.1). Older versions are available on the [Releases page](https://github.com/Small182/UAPlay-nx/releases).
-
-| File | Purpose |
-|---|---|
-| `UAPlay.nro` | The main application. **Required** to run UAPlay. |
-| `UAPlay.nsp` | An optional shortcut for launching UAPlay from the Switch HOME Menu. |
-
-1. Create the `switch` folder on your SD card if it does not already exist.
-2. Copy **`UAPlay.nro`** to the exact path **`sdmc:/switch/UAPlay.nro`**.
-3. Open the Homebrew Menu in full application mode (for example, by holding **R** while launching a game), then select UAPlay.
-4. **Optional:** Install `UAPlay.nsp` using a compatible homebrew installer to launch UAPlay directly from the HOME Menu.
-
-**Important:** `UAPlay.nsp` is a *forwarder*, not a standalone copy of the application. If `UAPlay.nro` is removed or moved, the shortcut will stop working. Installing unofficial NSP files requires an appropriately configured CFW environment and involves risks to your console and access to Nintendo services.
-
-When updating, **replace only `UAPlay.nro`**. Do not delete user-data folders. The NSP usually does not need to be reinstalled as long as its target path and shortcut remain unchanged.
+**UAPlay** is a lightweight native C11 application built with **SDL2, OpenGL ES 2.0/3.0, libmpv, FFmpeg, and libcurl**, ported from [Small182/UAPlay-nx](https://github.com/Small182/UAPlay-nx) to **TrimUI Brick** and **TrimUI Smart Pro** handhelds running **NextUI**. It renders its UI and streams video natively without Chromium, WebKit, or TorrServer.
 
 ## Features
 
-- **Ukrainian-language catalog:** Movies, TV series, cartoons, animated series, anime, and genre collections.
-- **Home screen:** Horizontal poster collections with ratings and a “Усі” (*All*) button that opens the full list.
-- **Search:** TMDB titles, the Switch on-screen keyboard, and filtering of irrelevant results.
-- **Title details:** Synopsis, year, genres, and available metadata; choose a video provider before searching for streams.
-- **Favorites and watch history:** Separate “На майбутнє” (*Watch Later*) and “Історія” (*History*) lists, playback-position saving, and the ability to clear watch history without deleting favorites.
-- **TV series and anime:** Season and episode selection when the provider supplies structured information, with support for advancing to the next episode.
-- **Offline downloads:** Press **Y** on a movie source or episode. The **Downloads** tab under Favorites provides progress, retry, deletion, and offline playback for supported streams.
-- **Switch battery:** Charge indicator in the catalog and player controls, without extra charging markers.
-- **libmpv player:** Pause, seeking, volume control, and selection of available audio tracks, dubbed versions, and subtitles.
-- **Video settings:** Playback speed, volume, subtitle size, and HLS quality presets (Auto / 360p / 480p / 720p / 1080p).
-- **Controls:** Joy-Con / Pro Controller and touchscreen.
-- **Appearance:** Light and dark themes with selectable accent colors.
-- **Japanese font:** Japanese characters in anime titles are supported.
+- **Ukrainian & English UI + TMDB Catalog:** Browse movies, TV series, cartoons, animated series, anime, and genre collections with country-of-origin filtering (excluding `RU` productions).
+- **Pixel-Accurate 4:3 & 16:9 Layouts:** Automatically adapts to **TrimUI Brick** (`1024×768`, 5 poster columns) and **TrimUI Smart Pro** (`1280×720`, 6 poster columns).
+- **Built-In Gamepad On-Screen Keyboard (`УКР` / `ENG`):** Full Ukrainian and English search input using the D-Pad or analog stick.
+- **Native `libmpv` + `FFmpeg` (ARM64 NEON) Player:** Direct HLS/MP4 playback, voiceover/dub switching, audio & subtitle track selection, playback speed control, and HLS quality presets (`Auto` / `360p` / `480p` / `720p` / `1080p`, defaulting to `720p`).
+- **NextUI Audio Integration:** Outputs audio via `ALSA`, working seamlessly with the built-in speaker, wired headphones, and NextUI's `audiomon` Bluetooth audio routing.
+- **Favorites, Watch Later & Resume:** Persistent local library with timestamp, season, and episode resume plus automatic next-episode progression.
+- **Offline SD Card Downloads:** Background download queue supporting direct MP4 and HLS (including OpenSSL AES-128 segment decryption) for offline viewing.
+- **SubDL Subtitle Integration:** Search and download Ukrainian or English external subtitles directly from the player menu.
+- **TrimUI Battery Indicator:** Reads real-time battery level from `/sys/class/power_supply/axp2202-battery/`.
 
-The catalog filters productions by TMDB country-of-origin metadata, including excluding entries associated with `RU`. Some results may be hidden when their country metadata cannot be verified.
+---
 
-## Video providers
+## Supported Devices
 
-You select a provider **before** searching for a playable stream. In **Settings → Providers**, press **A** or tap a row to toggle a provider. Disabled providers are hidden from the picker and receive no search requests. Your choices are saved to the SD card.
+| Device | NextUI Platform | Resolution | Poster Grid |
+|---|---|---|---|
+| **TrimUI Brick** (TG3040) | `tg5040` | `1024 × 768` (4:3) | 5 columns |
+| **TrimUI Brick Pro** | `tg5040` | `1024 × 768` (4:3) | 5 columns |
+| **TrimUI Smart Pro** (TG5040) | `tg5040` | `1280 × 720` (16:9) | 6 columns |
 
-The current beta includes:
+---
 
-| Provider | Notes |
-|---|---|
-| UAFlix | Movies and TV series; some episode pages are supported. |
-| UASerials | Search for Ukrainian-language content. |
-| Eneyida | Experimental integration. |
-| UAFilm | Experimental integration. |
-| UAKino | Experimental search; some requests use an alternative mirror. |
-| Mikai | Anime; playback availability depends on the video host. |
-| AnimeON | Anime; some embedded players may respond with **HTTP 403**. |
+## Installation
 
-**Not every search result can be played.** Third-party sites may change their HTML structures, require authentication, restrict access by region, or block direct requests. UAPlay does not bypass those restrictions.
+### Option 1: Manual SD Card Installation
+1. Download **`UAPlay.pak.zip`** from the [**Releases**](https://github.com/famiclone/UAPlay-trimui/releases/latest) page.
+2. Extract its contents into `/mnt/SDCARD/Tools/tg5040/UAPlay.pak/` on your NextUI SD card so `launch.sh`, `pak.json`, and `uaplay` sit directly inside `UAPlay.pak/`:
+   ```text
+   SDCARD/
+   └── Tools/
+       └── tg5040/
+           └── UAPlay.pak/
+               ├── launch.sh
+               ├── pak.json
+               ├── icon.png
+               ├── uaplay
+               ├── lib/
+               └── romfs/
+   ```
+3. Insert the SD card and launch **Tools → UAPlay** from NextUI.
 
-## Controls
+### Option 2: NextUI Pak Store / Pak Manager
+This repository includes a root [`pak.json`](pak.json) manifest (`"type": "TOOL"`, `"release_filename": "UAPlay.pak.zip"`) compatible with NextUI Pak managers using repository URL `https://github.com/famiclone/UAPlay-trimui`.
 
-To switch the interface language, open **Settings → Language / Мова** and press **A** or tap the button for the other language. Your choice is saved to the SD card. UAPlay requests TMDb titles and descriptions in the same language. Offline, it uses saved metadata.
+---
 
-Button labels correspond to the **Nintendo Switch** layout, not the Xbox controller layout.
+## TMDB & SubDL API Keys
+
+### TMDB API Key (Live Catalog & Search)
+If your build does not embed a TMDB key at compile time, place your free 32-character [TMDB API v3 Key](https://www.themoviedb.org/settings/api) (single line, no spaces) in either path on your SD card:
+- `Tools/tg5040/UAPlay.pak/tmdb.key`, or
+- `.userdata/tg5040/uaplay/tmdb.key`
+
+*(Without `tmdb.key`, UAPlay falls back to bundled demo snapshots in `romfs/*.json`, while live catalog browsing and search require a key).*
+
+### SubDL API Key (Optional External Subtitles)
+Place your [SubDL API Key](https://subdl.com/api-doc) on a single line in `Tools/tg5040/UAPlay.pak/subdl.key` or `.userdata/tg5040/uaplay/subdl.key`, then press **X → Search subtitles on SubDL** during playback.
+
+---
+
+## Controls (TrimUI Layout)
+
+Button labels match physical **TrimUI** face buttons (`A` = East, `B` = South, `X` = North, `Y` = West):
 
 | Screen | Controls |
 |---|---|
-| Catalog | **D-pad / stick** — navigate; **A** — open; **B** — back; **L/R** — switch main sections. |
-| Search and menus | **X** — search; **Y** — refresh catalog; **− (Minus)** — settings; **+ (Plus)** — exit. |
-| Poster collection | Press **↑** on the rightmost poster to focus the **“Усі” (All)** button. |
-| Categories | Press **→** on the last tab (“Документальне” / *Documentaries*, or “Аніме” / *Anime*) to focus **All**; press **←** on **All** to return to the tab on its left. |
-| Title details | **A** — choose a provider / watch; **X** — add to favorites; **Y** — mark as watched. |
-| Providers, seasons, episodes | **↑/↓** — select; **A** — confirm; **B** — back. Touch input is also supported. |
-| Player | **A** — pause; **←/→** — seek by 10 seconds; **R + ←/→** — seek by 60 seconds; **↑/↓** — volume; **B** — close player. |
-| Tracks and video | **X** — subtitles; **Y** — audio / dubbing; **− (Minus)** — video settings. |
+| **Catalog** | **D-Pad / Stick** — navigate; **A** — open; **B** — back; **L1 / R1** — switch top sections |
+| **Search & Settings** | **X** — open search; **Y** — refresh catalog; **SELECT / MENU** — open/close settings |
+| **Exit to NextUI** | **SELECT / MENU → Exit**, or **MENU + START** chord |
+| **On-Screen Keyboard** | **D-Pad** — select key; **A** — type key; **X / L1** — backspace (`⌫`); **R1** — space; **Y / MENU** — toggle language (`УКР` / `ENG`); **START** — submit search; **B** — cancel |
+| **Title Details** | **A** — pick source / resume; **X** — toggle favorite; **Y** — mark watched; **L2 / R2** — scroll synopsis |
+| **Sources & Episodes** | **↑ / ↓** — select; **A** — play; **Y** — download for offline playback; **B** — back |
+| **Video Player** | **A** — play / pause; **← / →** — seek ±10 s (**R1 + ← / →** — ±60 s); **↑ / ↓** — volume; **B** — close player |
+| **Tracks & Quality** | **X** — subtitles; **Y** — audio / dubs; **SELECT / MENU** — video options (HLS preset, speed, subtitle size & delay) |
 
-Swipe horizontally to browse poster rows. On Home, swipe vertically over the posters to switch collections. Vertical swipes also page through poster grids and long lists of sources, seasons, episodes, tracks, and downloads. Tap a poster or list item to open it.
+---
 
-The touch-enabled player provides playback controls, a seek bar, and a volume slider. The overlay hides automatically after a few seconds of inactivity.
+## User Data & Logs on SD Card
 
-## SubDL subtitles
+Updating `Tools/tg5040/UAPlay.pak/` preserves all user data stored under NextUI's `.userdata` directory:
 
-1. Save your [SubDL API key](https://subdl.com/api-doc) on the SD card at `switch/uaplay/subdl.key`. Put only the key on one line.
-2. While playing a movie or episode, press **X → Search subtitles on SubDL** and select a Ukrainian or English subtitle by release name.
-3. If the captions lead or lag, open **− → Subtitle delay** and adjust it with the arrow buttons.
+| SD Card Path | Purpose |
+|---|---|
+| `/mnt/SDCARD/.userdata/tg5040/uaplay/library.tsv` | Favorites, Watch Later, Watch History, and playback resume progress |
+| `/mnt/SDCARD/.userdata/tg5040/uaplay/settings.cfg` | Language, theme, accent color, enabled providers, HLS preset |
+| `/mnt/SDCARD/.userdata/tg5040/uaplay/posters/` | Disk poster cache |
+| `/mnt/SDCARD/.userdata/tg5040/uaplay/downloads/` | Downloaded offline videos |
+| `/mnt/SDCARD/.userdata/tg5040/uaplay/subtitles/` | Cached SubDL subtitle files |
+| `/mnt/SDCARD/.userdata/tg5040/logs/UAPlay.txt` | Latest runtime log |
 
-Search and download start when selected in the menu. UAPlay reuses subtitle files in `switch/uaplay/subtitles/` when you select the same result again.
+---
 
-## User data and updates
+## Building from Source
 
-Favorites, watch history, and playback positions are stored **locally on the SD card**, not in the NRO. The main library file is `sdmc:/switch/uaflix/library.tsv` (a legacy path preserved for compatibility with earlier versions).
-
-Replacing `UAPlay.nro` during an update **should not reset favorites**. Back up `sdmc:/switch/uaflix/` before formatting the SD card or reinstalling your system.
-
-## Building from source
-
-The project targets Nintendo Switch using devkitPro/devkitA64, with `libnx`, `SDL2`, `SDL2_ttf`, `SDL2_image`, `libmpv`, `libcurl`, and a network-enabled FFmpeg build for Switch.
-
-The easiest way to obtain a compiled NRO is via [GitHub Actions](https://github.com/Small182/UAPlay-nx/actions/workflows/build.yml). The workflow builds `UAPlay.nro` in a devkitPro container and uploads it as a build artifact.
-
-In a properly configured local devkitPro environment:
+Cross-compilation runs inside a reproducible Docker image ([`Dockerfile.tg5040`](Dockerfile.tg5040)) built on `ghcr.io/loveretro/tg5040-toolchain:latest` (`aarch64-nextui-linux-gnu-gcc`, `GLIBC 2.28`, Cortex-A53), statically linking `libmpv 0.36.0`, `FFmpeg 6.1.2` (NEON + OpenSSL), `libass 0.17.3`, `harfbuzz 8.3.0`, `fribidi 1.0.15`, and `libcurl 8.10.1`.
 
 ```sh
-make -j2
+# 1. Build the Docker toolchain image and compile dist/Tools/tg5040/UAPlay.pak + UAPlay.pak.zip
+make
+
+# 2. (Optional) Embed a TMDB v3 API key at compile time
+make TMDB_API_KEY="your_32_char_tmdb_key"
+
+# 3. Run host C parser & library regression tests
+make test
 ```
 
-Official release builds receive the TMDB key from the `TMDB_API_KEY` GitHub Actions secret during compilation. **The key is not stored in the public repository.** A local build without this setup may require a key at `sdmc:/switch/uaplay/tmdb.key`. Do not commit your API keys or include them in logs.
+---
 
-Some catalog and parser tests are located in [`tests/`](tests/). They do not replace testing on a real console.
+## Credits & Legal Notice
 
-## Acknowledgments
-
-Video downloads and some performance improvements were adapted from [UAPlay Vita](https://github.com/antoxa2584x/UAPlay-vita) by [antoxa2584x](https://github.com/antoxa2584x).
-
-## Limitations and legal notice
-
-- UAPlay is an **experimental homebrew project** and is not an official Nintendo, TMDB, or third-party video-service application.
-- Playback of a particular video, episode, dubbed version, or subtitle track depends on what the provider offers and what libmpv can read.
-- **No video content is bundled with the application.** Only access content you have the right to use.
-
-Metadata: *This product uses the TMDB API but is not endorsed or certified by TMDB.*
-
-Fonts: DejaVu Sans (Bitstream Vera-derived license) and Google Noto family fonts (SIL Open Font License 1.1).
+- **Original UAPlay (Nintendo Switch):** [Small182/UAPlay-nx](https://github.com/Small182/UAPlay-nx) by [Small182](https://github.com/Small182).
+- **Offline downloads & performance optimizations:** adapted from [antoxa2584x/UAPlay-vita](https://github.com/antoxa2584x/UAPlay-vita) by [antoxa2584x](https://github.com/antoxa2584x).
+- **NextUI OS & Toolchain:** [LoveRetro/NextUI](https://github.com/LoveRetro/NextUI) (`tg5040-toolchain`).
+- **Disclaimer:** UAPlay is an experimental homebrew project and is not affiliated with TrimUI, Nintendo, TMDB, or third-party streaming websites. No video content is bundled with this repository or application.
+- **Metadata:** *This product uses the TMDB API but is not endorsed or certified by TMDB.*
+- **Fonts:** Inter, DejaVu Sans, and Google Noto Sans (SIL Open Font License 1.1 / Bitstream Vera).

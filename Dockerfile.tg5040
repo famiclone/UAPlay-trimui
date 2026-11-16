@@ -1,0 +1,223 @@
+FROM ghcr.io/loveretro/tg5040-toolchain:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    meson \
+    curl \
+    ca-certificates \
+    xz-utils \
+    bzip2 \
+    zip \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV SYSROOT=/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc
+ENV PKG_CONFIG_SYSROOT_DIR=${SYSROOT}
+ENV PKG_CONFIG_LIBDIR=${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig
+ENV PKG_CONFIG_PATH=""
+ENV CFLAGS="-O2 -mcpu=cortex-a53 -fPIC"
+ENV CXXFLAGS="-O2 -mcpu=cortex-a53 -fPIC"
+ENV LDFLAGS="-Wl,-rpath-link,${SYSROOT}/usr/lib -Wl,-rpath-link,${SYSROOT}/lib"
+
+# Remove any stale libtool .la files in the SDK sysroot that reference build-host paths
+RUN find "${SYSROOT}" -name '*.la' -delete
+
+# Meson cross-compilation configuration for tg5040 (TrimUI Brick / Smart Pro)
+RUN printf '%s\n' \
+    "[binaries]" \
+    "c = '/opt/aarch64-nextui-linux-gnu/bin/aarch64-nextui-linux-gnu-gcc'" \
+    "cpp = '/opt/aarch64-nextui-linux-gnu/bin/aarch64-nextui-linux-gnu-g++'" \
+    "ar = '/opt/aarch64-nextui-linux-gnu/bin/aarch64-nextui-linux-gnu-ar'" \
+    "strip = '/opt/aarch64-nextui-linux-gnu/bin/aarch64-nextui-linux-gnu-strip'" \
+    "pkg-config = '/usr/bin/pkg-config'" \
+    "pkgconfig = '/usr/bin/pkg-config'" \
+    "" \
+    "[built-in options]" \
+    "c_args = ['-O2', '-mcpu=cortex-a53', '-fPIC']" \
+    "cpp_args = ['-O2', '-mcpu=cortex-a53', '-fPIC']" \
+    "c_link_args = ['-Wl,-rpath-link,/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/usr/lib', '-Wl,-rpath-link,/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/lib']" \
+    "cpp_link_args = ['-Wl,-rpath-link,/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/usr/lib', '-Wl,-rpath-link,/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/lib']" \
+    "" \
+    "[properties]" \
+    "sys_root = '/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc'" \
+    "pkg_config_libdir = '/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/usr/lib/pkgconfig:/opt/aarch64-nextui-linux-gnu/aarch64-nextui-linux-gnu/libc/usr/share/pkgconfig'" \
+    "" \
+    "[host_machine]" \
+    "system = 'linux'" \
+    "cpu_family = 'aarch64'" \
+    "cpu = 'cortex-a53'" \
+    "endian = 'little'" \
+    > /opt/aarch64-nextui-linux-gnu/meson-cross.ini
+
+WORKDIR /tmp/deps
+
+# 1. libcurl (static, OpenSSL + zlib, HTTP/HTTPS focused)
+RUN curl -fsSL https://curl.se/download/curl-8.10.1.tar.xz | tar -xJ && \
+    cd curl-8.10.1 && \
+    ./configure \
+        --build="$(uname -m)-unknown-linux-gnu" \
+        --host=aarch64-nextui-linux-gnu \
+        --prefix=/usr \
+        --with-sysroot=${SYSROOT} \
+        --with-pic \
+        --disable-shared \
+        --enable-static \
+        --enable-http \
+        --enable-file \
+        --enable-proxy \
+        --enable-ipv6 \
+        --enable-threaded-resolver \
+        --with-openssl \
+        --with-zlib \
+        --without-libpsl \
+        --without-libidn2 \
+        --without-nghttp2 \
+        --without-brotli \
+        --without-zstd \
+        --without-librtmp \
+        --disable-ftp \
+        --disable-ldap \
+        --disable-ldaps \
+        --disable-rtsp \
+        --disable-dict \
+        --disable-telnet \
+        --disable-tftp \
+        --disable-pop3 \
+        --disable-imap \
+        --disable-smb \
+        --disable-smtp \
+        --disable-gopher \
+        --disable-mqtt \
+        --disable-manual \
+        --disable-docs && \
+    make -j"$(nproc)" && \
+    make DESTDIR=${SYSROOT} install && \
+    find "${SYSROOT}" -name '*.la' -delete && \
+    cd /tmp/deps && rm -rf curl-8.10.1
+
+# 2. FriBidi (static, required by libass)
+RUN curl -fsSL https://github.com/fribidi/fribidi/releases/download/v1.0.15/fribidi-1.0.15.tar.xz | tar -xJ && \
+    cd fribidi-1.0.15 && \
+    meson setup build \
+        --cross-file=/opt/aarch64-nextui-linux-gnu/meson-cross.ini \
+        --prefix=/usr \
+        --default-library=static \
+        -Ddocs=false \
+        -Dbin=false \
+        -Dtests=false && \
+    DESTDIR=${SYSROOT} ninja -C build install && \
+    cd /tmp/deps && rm -rf fribidi-1.0.15
+
+# 3. HarfBuzz (static, with FreeType, required by libass)
+RUN curl -fsSL https://github.com/harfbuzz/harfbuzz/releases/download/8.3.0/harfbuzz-8.3.0.tar.xz | tar -xJ && \
+    cd harfbuzz-8.3.0 && \
+    meson setup build \
+        --cross-file=/opt/aarch64-nextui-linux-gnu/meson-cross.ini \
+        --prefix=/usr \
+        --default-library=static \
+        -Dfreetype=enabled \
+        -Dglib=disabled \
+        -Dgobject=disabled \
+        -Dcairo=disabled \
+        -Dicu=disabled \
+        -Dtests=disabled \
+        -Dintrospection=disabled \
+        -Ddocs=disabled \
+        -Dbenchmark=disabled && \
+    DESTDIR=${SYSROOT} ninja -C build install && \
+    cd /tmp/deps && rm -rf harfbuzz-8.3.0
+
+# 4. libass (static, subtitle renderer for libmpv)
+RUN curl -fsSL https://github.com/libass/libass/releases/download/0.17.3/libass-0.17.3.tar.xz | tar -xJ && \
+    cd libass-0.17.3 && \
+    ./configure \
+        --build="$(uname -m)-unknown-linux-gnu" \
+        --host=aarch64-nextui-linux-gnu \
+        --prefix=/usr \
+        --with-sysroot=${SYSROOT} \
+        --with-pic \
+        --disable-shared \
+        --enable-static \
+        --enable-fontconfig && \
+    make -j"$(nproc)" && \
+    make DESTDIR=${SYSROOT} install && \
+    find "${SYSROOT}" -name '*.la' -delete && \
+    cd /tmp/deps && rm -rf libass-0.17.3
+
+# 5. FFmpeg 6.1.2 (static, ARM64 Cortex-A53 NEON + OpenSSL + libass + network/HLS/demuxers/decoders)
+RUN curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.1.2.tar.xz | tar -xJ && \
+    cd ffmpeg-6.1.2 && \
+    ./configure \
+        --enable-cross-compile \
+        --cross-prefix=aarch64-nextui-linux-gnu- \
+        --arch=aarch64 \
+        --cpu=cortex-a53 \
+        --target-os=linux \
+        --sysroot=${SYSROOT} \
+        --pkg-config=pkg-config \
+        --pkg-config-flags="--static" \
+        --prefix=/usr \
+        --extra-cflags="-O2 -mcpu=cortex-a53 -fPIC" \
+        --extra-ldflags="-Wl,-rpath-link,${SYSROOT}/usr/lib -Wl,-rpath-link,${SYSROOT}/lib" \
+        --extra-libs="-ldl -lpthread -lm" \
+        --enable-pic \
+        --enable-static \
+        --disable-shared \
+        --disable-programs \
+        --disable-doc \
+        --disable-debug \
+        --disable-devices \
+        --disable-encoders \
+        --disable-muxers \
+        --enable-neon \
+        --enable-pthreads \
+        --enable-network \
+        --enable-openssl \
+        --enable-libass \
+        --enable-zlib \
+        --enable-bzlib \
+        --enable-lzma && \
+    make -j"$(nproc)" && \
+    make DESTDIR=${SYSROOT} install && \
+    cd /tmp/deps && rm -rf ffmpeg-6.1.2
+
+# 6. mpv 0.36.0 (static libmpv with OpenGL ES / EGL render API + ALSA + SDL2 audio + libass)
+RUN curl -fsSL https://github.com/mpv-player/mpv/archive/refs/tags/v0.36.0.tar.gz | tar -xz && \
+    cd mpv-0.36.0 && \
+    meson setup build \
+        --cross-file=/opt/aarch64-nextui-linux-gnu/meson-cross.ini \
+        --prefix=/usr \
+        --default-library=static \
+        -Dlibmpv=true \
+        -Dcplayer=false \
+        -Dtests=false \
+        -Dmanpage-build=disabled \
+        -Dhtml-build=disabled \
+        -Dpdf-build=disabled \
+        -Dlua=disabled \
+        -Djavascript=disabled \
+        -Dlibarchive=disabled \
+        -Duchardet=disabled \
+        -Drubberband=disabled \
+        -Dlcms2=disabled \
+        -Dvapoursynth=disabled \
+        -Ddvdnav=disabled \
+        -Dcdda=disabled \
+        -Dalsa=enabled \
+        -Dsdl2=enabled \
+        -Dsdl2-audio=enabled \
+        -Dsdl2-gamepad=disabled \
+        -Dsdl2-video=disabled \
+        -Dgl=enabled \
+        -Degl=disabled \
+        -Dplain-gl=enabled \
+        -Dx11=disabled \
+        -Dwayland=disabled \
+        -Ddrm=disabled \
+        -Dgbm=disabled \
+        -Dvulkan=disabled \
+        -Dlibplacebo=disabled && \
+    DESTDIR=${SYSROOT} ninja -C build install && \
+    cd /tmp/deps && rm -rf mpv-0.36.0
+
+WORKDIR /root/workspace

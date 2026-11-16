@@ -10,7 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
-#ifdef __vita__
+#if defined(__vita__) || defined(__TRIMUI__)
 #include <openssl/evp.h>
 #endif
 
@@ -63,7 +63,13 @@ static void net_profile_record(char kind, void *curl, const char *url,
     (void)kind; (void)curl; (void)url; (void)waited;
     (void)result; (void)bytes; (void)error;
 }
-static void net_tls_options(void *curl) { (void)curl; }
+static void net_tls_options(void *curl) {
+#ifdef UAPLAY_CA_BUNDLE
+    curl_easy_setopt((CURL *)curl, CURLOPT_CAINFO, UAPLAY_CA_BUNDLE);
+#else
+    (void)curl;
+#endif
+}
 void downloads_pause(int paused) { SDL_AtomicSet(&downloads_paused_flag, paused != 0); }
 #else
 void downloads_pause(int paused) { net_background_pause(paused); }
@@ -113,7 +119,7 @@ static void load_index(void) {
         if (d->id >= next_id) next_id = d->id + 1;
         /* Interrupted downloads start again from the beginning. */
         if (d->state == DOWNLOAD_ACTIVE) {
-            char part[64];
+            char part[256];
             part_path(d->id, part, sizeof(part));
             remove(part);
             d->state = DOWNLOAD_QUEUED;
@@ -434,7 +440,7 @@ static int hex_to_iv(const char *text, unsigned char *iv) {
     return 1;
 }
 
-#ifdef __vita__
+#if defined(__vita__) || defined(__TRIMUI__)
 static int decrypt(Buffer *b, const HlsKey *key, const unsigned char *iv) {
     unsigned char *plain = malloc(b->used + 16);
     if (!plain) return 0;
@@ -474,7 +480,7 @@ static int download_hls(CURL *curl, unsigned id, char *playlist, const char *bas
                 snprintf(error, error_size, TR("Шифрування %s не підтримується","Unsupported encryption: %s"), method);
                 goto done;
             }
-#ifndef __vita__
+#if !defined(__vita__) && !defined(__TRIMUI__)
             snprintf(error, error_size, TR("Зашифрований потік не підтримується","Encrypted stream is unsupported"));
             goto done;
 #endif
@@ -552,7 +558,7 @@ static int download_hls(CURL *curl, unsigned id, char *playlist, const char *bas
             free(data.data);
             goto done;
         }
-#ifdef __vita__
+#if defined(__vita__) || defined(__TRIMUI__)
         if (s->key >= 0) {
             unsigned char iv[16];
             if (keys[s->key].has_iv) memcpy(iv, keys[s->key].iv, 16);
@@ -603,7 +609,7 @@ static char *read_small_file(const char *path) {
 
 static int download_one(CURL *curl, const Download *job, char *file, size_t file_size,
                         char *error, size_t error_size) {
-    char part[64], effective[2048], url[2048];
+    char part[256], effective[2048], url[2048];
     part_path(job->id, part, sizeof(part));
     snprintf(url, sizeof(url), "%s", job->url);
     FILE *out = fopen(part, "wb");
@@ -769,7 +775,7 @@ static int download_worker(void *opaque) {
         save_index();
         SDL_UnlockMutex(lock);
 
-        char file[160] = "", error[96] = "";
+        char file[256] = "", error[96] = "";
         int ok = curl && download_one(curl, &job, file, sizeof(file), error, sizeof(error));
         if (!curl) snprintf(error, sizeof(error), TR("curl недоступний","curl is unavailable"));
 
@@ -801,7 +807,7 @@ static int download_worker(void *opaque) {
 /* ---------- API ---------- */
 
 void downloads_init(void) {
-    mkdir(UAPLAY_DATA_DIR, 0777);
+    uaplay_ensure_data_dirs();
     mkdir(DOWNLOADS_DIR, 0777);
     lock = SDL_CreateMutex();
     wake = SDL_CreateCond();

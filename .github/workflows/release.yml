@@ -1,0 +1,85 @@
+name: Release UAPlay.pak
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.5.1)"
+        required: true
+        default: "v0.5.1"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish NextUI Pak Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host test dependencies & run smoke tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+          make test
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build tg5040 cross-toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.tg5040
+          tags: uaplay-tg5040-builder:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Optionally embed TMDB API key from repository secret
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          set -eu
+          if [ -z "${TMDB_API_KEY:-}" ]; then
+            echo "::notice::TMDB_API_KEY secret is not set; building with runtime tmdb.key support."
+            exit 0
+          fi
+          umask 077
+          {
+            printf '#ifndef UAPLAY_TMDB_BUILD_KEY_H\n#define UAPLAY_TMDB_BUILD_KEY_H\n'
+            printf '#define UAPLAY_TMDB_BUILD_KEY "%s"\n' "$TMDB_API_KEY"
+            printf '#endif\n'
+          } > source/tmdb_build_key.h
+
+      - name: Build UAPlay.pak.zip
+        run: |
+          docker run --rm \
+            -v "$PWD:/root/workspace" \
+            -w /root/workspace \
+            uaplay-tg5040-builder:latest \
+            make -j"$(nproc)" PLATFORM=trimui
+          sha256sum UAPlay.pak.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" UAPlay.pak.zip SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" \
+              UAPlay.pak.zip \
+              SHA256SUMS.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "UAPlay ${RELEASE_TAG#v} — TrimUI Brick & Smart Pro (NextUI)" \
+              --notes-file .release/RELEASE_NOTES.md
+          fi

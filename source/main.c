@@ -5,13 +5,16 @@
 #include <math.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#ifdef __SWITCH__
 #include <switch.h>
+#endif
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <GLES2/gl2.h>
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
 #include <curl/curl.h>
+#include "platform.h"
 #include "i18n.h"
 #include "catalog.h"
 #include "posters.h"
@@ -37,10 +40,26 @@ static void battery_status_poll(void){
     Uint32 now=SDL_GetTicks();
     if(!first && now-last_checked<15000u)return;
     first=0;last_checked=now;
+#ifdef __SWITCH__
     u32 amount=0;
     if(R_SUCCEEDED(psmGetBatteryChargePercentage(&amount)) && amount<=100)
         battery_percentage=(int)amount;
     else battery_percentage=-1;
+#elif defined(__TRIMUI__)
+    static const char *paths[]={
+        "/sys/class/power_supply/axp2202-battery/capacity",
+        "/sys/class/power_supply/battery/capacity"
+    };
+    int val=-1;
+    for(int i=0;i<2 && val<0;i++){
+        FILE *f=fopen(paths[i],"r");
+        if(f){
+            if(fscanf(f,"%d",&val)!=1)val=-1;
+            fclose(f);
+        }
+    }
+    battery_percentage=(val>=0 && val<=100)?val:-1;
+#endif
 }
 static int download_season=0, download_episode=0;
 static const UiText provider_names[]={{"UAFlix","UAFlix"},{"UASerials","UASerials"},{"Eneyida","Eneyida"},
@@ -105,7 +124,11 @@ static int selected_video_option;
    subtitle delay and HLS quality. Keep mpv's existing option storage intact. */
 static const int visible_video_options[]={0,1,4,5,6};
 #define VIDEO_OPTION_COUNT ((int)(sizeof(visible_video_options)/sizeof(visible_video_options[0])))
+#ifdef __TRIMUI__
+static double video_options[]={1.0,100.0,0.0,0.0,48.0,0.0,3.0};
+#else
 static double video_options[]={1.0,100.0,0.0,0.0,48.0,0.0,0.0};
+#endif
 static const char *video_props[]={"speed","volume","brightness","contrast",
                                   "sub-font-size","sub-delay","hls-bitrate"};
 static const UiText video_titles[]={{"Швидкість","Speed"},{"Гучність","Volume"},{"Яскравість","Brightness"},{"Контраст","Contrast"},
@@ -213,13 +236,21 @@ static int sort_button_for_mode(int mode){
 /* 0: Watch, 1: Add to favorites (details buttons). */
 static int details_button_focus=0;
 enum { SETTING_THEME, SETTING_INTERFACE, SETTING_PLAYER, SETTING_AUTOPLAY,
-       SETTING_PROVIDERS, SETTING_LANGUAGE, SETTING_COUNT };
+       SETTING_PROVIDERS, SETTING_LANGUAGE,
+#ifdef __TRIMUI__
+       SETTING_EXIT,
+#endif
+       SETTING_COUNT };
+#ifdef __TRIMUI__
+enum { SETTINGS_Y=132, SETTINGS_ROW_STEP=74, SETTINGS_ROW_HEIGHT=58 };
+#else
 enum { SETTINGS_Y=136, SETTINGS_ROW_STEP=80, SETTINGS_ROW_HEIGHT=64 };
+#endif
 static int settings_selected=0,ui_accent_alt=0,source_mode=0;
 static int autoplay_episodes=1;
 #define NEXT_EPISODE_DELAY_MS 3000u
 static int ui_light_theme=0,ui_theme_enabled=1,ui_gradient_pass=0;
-#define THEME_PATH "sdmc:/switch/uaplay/theme.txt"
+#define THEME_PATH UAPLAY_DATA_DIR "/theme.txt"
 #define THEME_TMP THEME_PATH ".tmp"
 #define THEME_BACKUP THEME_PATH ".bak"
 static void theme_load(void){
@@ -247,8 +278,7 @@ static void theme_load(void){
     }
 }
 static int theme_save(void){
-    mkdir("sdmc:/switch",0777);
-    mkdir("sdmc:/switch/uaplay",0777);
+    uaplay_ensure_data_dirs();
     FILE *f=fopen(THEME_TMP,"w");
     if(!f)return 0;
     int written=fprintf(f,"%d%d\n%u\n%s\nmovy\n",ui_light_theme,autoplay_episodes,
@@ -638,6 +668,11 @@ static int load_category_mode(int category,const char *query,Movie *movies,char 
 static int load_category(int category,const char *query,Movie *movies,char *message,int size){
     return load_category_mode(category,query,movies,message,size,-1);
 }
+#ifdef __TRIMUI__
+static int ui_w=1024,ui_h=768,fb_w=1024,fb_h=768;
+#else
+static int ui_w=1280,ui_h=720,fb_w=1280,fb_h=720;
+#endif
 typedef struct {
     GLuint program, vbo, tex, solid_tex;
     GLint tint, shape, gradient, outline, sampler;
@@ -656,8 +691,10 @@ typedef struct {
 static void paint_clip(Paint *p,int x,int y,int w,int h){
     p->clip=(SDL_Rect){x,y,w,h};
     if(w>0 && h>0){
+        int sx=x*fb_w/ui_w,sy=y*fb_h/ui_h;
+        int sw=(x+w)*fb_w/ui_w-sx,sh=(y+h)*fb_h/ui_h-sy;
         glEnable(GL_SCISSOR_TEST);
-        glScissor(x,720-y-h,w,h);
+        glScissor(sx,fb_h-sy-sh,sw,sh);
     }else glDisable(GL_SCISSOR_TEST);
 }
 static const char *script_fonts[]={"Tamil","Telugu","Devanagari","Malayalam",
@@ -753,13 +790,13 @@ static int paint_init(Paint *p) {
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,white);
     if (TTF_Init()) return 0;
     /* Inter has SF/Helvetica-like proportions and includes Ukrainian glyphs. */
-    p->font=TTF_OpenFont("romfs:/InterVariable.ttf",22);
-    p->font_big=TTF_OpenFont("romfs:/InterVariable.ttf",31);
-    p->font_clock=TTF_OpenFont("romfs:/InterVariable.ttf",34);
-    p->font_small=TTF_OpenFont("romfs:/InterVariable.ttf",19);
-    p->font_tiny=TTF_OpenFont("romfs:/InterVariable.ttf",15);
+    p->font=TTF_OpenFont(UAPLAY_ROMFS "InterVariable.ttf",22);
+    p->font_big=TTF_OpenFont(UAPLAY_ROMFS "InterVariable.ttf",31);
+    p->font_clock=TTF_OpenFont(UAPLAY_ROMFS "InterVariable.ttf",34);
+    p->font_small=TTF_OpenFont(UAPLAY_ROMFS "InterVariable.ttf",19);
+    p->font_tiny=TTF_OpenFont(UAPLAY_ROMFS "InterVariable.ttf",15);
     for(int i=0;i<7;i++){
-        char path[96];snprintf(path,sizeof(path),"romfs:/NotoSans%s.ttf",script_fonts[i]);
+        char path[96];snprintf(path,sizeof(path),UAPLAY_ROMFS "NotoSans%s.ttf",script_fonts[i]);
         p->scripts[i]=TTF_OpenFont(path,22);
         p->scripts_small[i]=TTF_OpenFont(path,19);
         p->scripts_big[i]=TTF_OpenFont(path,31);
@@ -767,13 +804,14 @@ static int paint_init(Paint *p) {
     }
     const int jp_sizes[]={22,19,31,15};
     for(int i=0;i<4;i++)
-        p->japanese[i]=TTF_OpenFont("romfs:/NotoSansCJKjp-Regular.otf",jp_sizes[i]);
+        p->japanese[i]=TTF_OpenFont(UAPLAY_ROMFS "NotoSansCJKjp-Regular.otf",jp_sizes[i]);
     return p->font != NULL;
 }
 static int ui_outline_width=0;
 static void box_alpha(Paint *p,int x,int y,int w,int h,float r,float g,float b,float a,int radius) {
-    float x0=x/640.f-1.f,x1=(x+w)/640.f-1.f;
-    float y0=1.f-y/360.f,y1=1.f-(y+h)/360.f;
+    float hw=ui_w*.5f,hh=ui_h*.5f;
+    float x0=x/hw-1.f,x1=(x+w)/hw-1.f;
+    float y0=1.f-y/hh,y1=1.f-(y+h)/hh;
     float vertices[]={x0,y0,0,0, x1,y0,1,0, x0,y1,0,1,
                       x1,y0,1,0, x1,y1,1,1, x0,y1,0,1};
     glUseProgram(p->program);
@@ -963,13 +1001,25 @@ static void headline(Paint *p,const char *str,int x,int y,int limit){
     text(p,str,x,y,limit);
     p->font=normal;
 }
-/* A single 8-point scale keeps every screen aligned and touch targets stable. */
-enum { UI_EDGE=32, UI_FOOTER_TOP=668, UI_ROW_Y=130,
-       UI_ROW_HEIGHT=50, UI_ROW_STEP=58, UI_ROWS=8 };
-enum { POSTER_COLUMNS=6, POSTER_ROW_Y=389, POSTER_ROW_BOTTOM=661,
-       POSTER_GRID_Y=153, LIBRARY_GRID_Y=162, POSTER_GRID_BOTTOM=613 };
-enum { POSTER_STEP=201, GRID_ITEMS=2*POSTER_COLUMNS, GRID_PAGE_STEP=512,
-       SHELF_STEP=288, SCROLL_MS=220, PRESS_MS=150, PRESS_PREVIEW_MS=46 };
+/* A single 8-point scale keeps every screen aligned and touch targets stable.
+   Adapts cleanly between 1024x768 (TrimUI Brick) and 1280x720 (Smart Pro / Switch). */
+#define UI_COMPACT (ui_w<1200)
+#define UI_EDGE (UI_COMPACT?24:32)
+#define UI_CONTENT_W (ui_w-2*UI_EDGE)
+#define UI_FOOTER_TOP (ui_h-52)
+enum { UI_ROW_Y=130, UI_ROW_HEIGHT=50, UI_ROW_STEP=58, UI_ROWS=8 };
+#define MAX_POSTER_COLUMNS 6
+#define POSTER_COLUMNS (UI_COMPACT?5:6)
+#define POSTER_ROW_X (UI_COMPACT?57:53)
+#define POSTER_GRID_X (UI_COMPACT?63:54)
+#define POSTER_STEP (UI_COMPACT?190:201)
+#define GRID_ITEMS (2*POSTER_COLUMNS)
+#define POSTER_ROW_Y 389
+#define POSTER_ROW_BOTTOM (ui_h-59)
+#define POSTER_GRID_Y 153
+#define LIBRARY_GRID_Y 162
+#define POSTER_GRID_BOTTOM (ui_h-107)
+enum { GRID_PAGE_STEP=512, SHELF_STEP=288, SCROLL_MS=220, PRESS_MS=150, PRESS_PREVIEW_MS=46 };
 
 typedef enum { TOUCH_NONE, TOUCH_TAP, SWIPE_LEFT, SWIPE_RIGHT,
                SWIPE_UP, SWIPE_DOWN } TouchAction;
@@ -1064,7 +1114,7 @@ static int scroll_offset(ScrollMotion *motion,int target,const int *drag,int lim
 static const int *touch_drag(Page page,int axis,int top,int bottom){
     const TouchGesture *touch=ui_touch;
     if(!touch || !touch->active || touch->page!=page || touch->axis!=axis ||
-       touch->x<UI_EDGE || touch->x>=1280-UI_EDGE || touch->y<top || touch->y>=bottom)
+       touch->x<UI_EDGE || touch->x>=ui_w-UI_EDGE || touch->y<top || touch->y>=bottom)
         return NULL;
     return axis==1?&touch->dx:&touch->dy;
 }
@@ -1212,13 +1262,18 @@ static void press_preview(Paint *p,int x,int y,int w,int h,int radius){
     ui_outline_width=0;
 }
 
-static const int player_button_centers[]={354,476,598,832,954,1076};
+static int player_button_center(int i){
+    static const int wide_centers[]={354,476,598,832,954,1076};
+    static const int compact_centers[]={296,404,512,656,764,872};
+    return UI_COMPACT?compact_centers[i]:wide_centers[i];
+}
 static int pressed_player_button(int key,SDL_Rect *rect){
     const int keys[]={SDL_CONTROLLER_BUTTON_DPAD_LEFT,SDL_CONTROLLER_BUTTON_A,
                       SDL_CONTROLLER_BUTTON_DPAD_RIGHT,SDL_CONTROLLER_BUTTON_BACK,
                       SDL_CONTROLLER_BUTTON_Y,SDL_CONTROLLER_BUTTON_X};
+    int btn_y=ui_h-110;
     for(int i=0;i<6;i++)if(keys[i]==key){
-        *rect=(SDL_Rect){player_button_centers[i]-38,610,76,58};
+        *rect=(SDL_Rect){player_button_center(i)-38,btn_y,76,58};
         return 1;
     }
     return 0;
@@ -1252,14 +1307,15 @@ static void polygon(Paint *p,const float *points,int count,float r,float g,float
     if(count<3 || count>60)return;
     float vertices[(60+2)*4];
     float cx=0,cy=0;
+    float hw=ui_w*.5f,hh=ui_h*.5f;
     for(int i=0;i<count;i++){cx+=points[2*i];cy+=points[2*i+1];}
     cx/=count;cy/=count;
-    vertices[0]=cx/640.f-1.f;vertices[1]=1.f-cy/360.f;
+    vertices[0]=cx/hw-1.f;vertices[1]=1.f-cy/hh;
     vertices[2]=vertices[3]=.5f;
     for(int i=0;i<=count;i++){
         int j=i%count;
-        vertices[(i+1)*4]=points[j*2]/640.f-1.f;
-        vertices[(i+1)*4+1]=1.f-points[j*2+1]/360.f;
+        vertices[(i+1)*4]=points[j*2]/hw-1.f;
+        vertices[(i+1)*4+1]=1.f-points[j*2+1]/hh;
         vertices[(i+1)*4+2]=vertices[(i+1)*4+3]=.5f;
     }
     if(ui_theme_enabled && ui_light_theme){r=1.f-r;g=1.f-g;b=1.f-b;}
@@ -1344,27 +1400,32 @@ static void battery_status_horizontal(Paint *p,int x,int y){
     ui_theme_enabled=old_theme;
 }
 static void screen_header(Paint *p,const char *name,const char *context){
-    box_alpha(p,0,0,1280,92,.058f,.069f,.083f,1.f,0);
+    int has_ctx=context && *context && strcmp(context,"UAPlay");
+    int title_x=UI_EDGE+73;
+    int ctx_w=248,ctx_x=ui_w-UI_EDGE-ctx_w;
+    int title_w=(has_ctx?ctx_x-16:ui_w-UI_EDGE)-title_x;
+    box_alpha(p,0,0,ui_w,92,.058f,.069f,.083f,1.f,0);
     box_alpha(p,UI_EDGE,23,55,48,.13f,.16f,.20f,1.f,13);
     text_center(p,"‹",UI_EDGE,25,55,p->font_big,.96f,.97f,.99f);
     press_preview(p,UI_EDGE,23,55,48,13);
-    headline(p,name,105,23,860);
-    if(context && *context && strcmp(context,"UAPlay"))
-        text_tiny(p,context,979,38,264);
+    headline(p,name,title_x,23,title_w);
+    if(has_ctx)
+        text_tiny(p,context,ctx_x,38,ctx_w);
 }
 static void list_row(Paint *p,const char *title,int y,int selected,
                      const char *detail){
-    box_alpha(p,UI_EDGE,y,1216,UI_ROW_HEIGHT,
+    int row_w=UI_CONTENT_W;
+    box_alpha(p,UI_EDGE,y,row_w,UI_ROW_HEIGHT,
               selected?.20f:.085f,selected?.30f:.105f,
               selected?.38f:.135f,1.f,12);
     if(selected){
         float r,g,b;accent(&r,&g,&b);
         box_alpha(p,UI_EDGE,y+9,4,UI_ROW_HEIGHT-18,r,g,b,1.f,2);
-        selection_frame(p,UI_EDGE,y,1216,UI_ROW_HEIGHT);
+        selection_frame(p,UI_EDGE,y,row_w,UI_ROW_HEIGHT);
     }
-    text(p,title,UI_EDGE+22,y+9,detail?915:1155);
-    if(detail)text_muted(p,detail,1052,y+13,178);
-    press_preview(p,UI_EDGE,y,1216,UI_ROW_HEIGHT,12);
+    text(p,title,UI_EDGE+22,y+9,detail?row_w-245:row_w-48);
+    if(detail)text_muted(p,detail,UI_EDGE+row_w-196,y+13,182);
+    press_preview(p,UI_EDGE,y,row_w,UI_ROW_HEIGHT,12);
 }
 static int footer_position,footer_total;
 static Page footer_page;
@@ -1376,19 +1437,29 @@ static int offline_catalog_status(const char *message){
 }
 
 static void footer(Paint *p,const char *message) {
-    box_alpha(p,0,UI_FOOTER_TOP,1280,720-UI_FOOTER_TOP,.047f,.057f,.070f,1.f,0);
+    int ftop=UI_FOOTER_TOP;
+    box_alpha(p,0,ftop,ui_w,ui_h-ftop,.047f,.057f,.070f,1.f,0);
     /* Monochrome Switch-style controller legend, independent of UI accent. */
     float ar=.62f,ag=.64f,ab=.66f;
-    box_alpha(p,UI_EDGE,UI_FOOTER_TOP,1216,2,ar,ag,ab,.78f,0);
+    box_alpha(p,UI_EDGE,ftop,UI_CONTENT_W,2,ar,ag,ab,.78f,0);
     char position[30];
     snprintf(position,sizeof(position),"%d / %d",footer_position,footer_total);
-    text_font(p,footer_total && !(footer_page==CATALOG && expanded_catalog)?position:"UAPLAY",43,682,140,
-              p->font_small,ar,ag,ab);
+    text_font(p,footer_total && !(footer_page==CATALOG && expanded_catalog)?position:"UAPLAY",
+              UI_EDGE+10,ftop+14,132,p->font_small,ar,ag,ab);
     const char *keys[6],*labels[6];int count=0;
+#ifdef __TRIMUI__
+    const char *menu_key="MENU";
+#else
+    const char *menu_key="−";
+#endif
 #define HINT(k,l) do{keys[count]=k;labels[count]=l;count++;}while(0)
     if(footer_page==CATALOG){
-        HINT("L",TR("Розділ","Section"));HINT("R",TR("Розділ","Section"));
-        HINT("X",TR("Пошук","Search"));HINT("−",TR("Меню","Menu"));HINT("A",TR("Відкрити","Open"));
+        if(UI_COMPACT){
+            HINT("L/R",TR("Розділ","Section"));
+        }else{
+            HINT("L",TR("Розділ","Section"));HINT("R",TR("Розділ","Section"));
+        }
+        HINT("X",TR("Пошук","Search"));HINT(menu_key,TR("Меню","Menu"));HINT("A",TR("Відкрити","Open"));
         if(ui_category==0 && !expanded_catalog)HINT("↑↓",TR("Добірка","Collection"));
         if(expanded_catalog)HINT("B",TR("Згорнути","Collapse"));
         else if(ui_category!=0)HINT("B",TR("Головна","Home"));
@@ -1415,26 +1486,27 @@ static void footer(Paint *p,const char *message) {
         HINT("↑↓",TR("Вибір","Select"));HINT("A",TR("Відкрити","Open"));HINT("B",TR("Назад","Back"));
     }
 #undef HINT
+    int gap=UI_COMPACT?8:12,tail=UI_COMPACT?10:20;
     int widths[6]={0},total=0;
     for(int i=0;i<count;i++){
         int badge_width=measure(p,keys[i],p->font_small)+12;
         if(badge_width<30)badge_width=30;
-        widths[i]=badge_width+8+measure(p,labels[i],p->font_small)+20;
+        widths[i]=badge_width+8+measure(p,labels[i],p->font_small)+tail;
         total+=widths[i];
     }
-    total+=(count-1)*12;
-    int x=1244-total;
-    if(x<204)x=204;
+    total+=(count-1)*gap;
+    int x=ui_w-UI_EDGE-4-total;
+    if(x<UI_EDGE+140)x=UI_EDGE+140;
     for(int i=0;i<count;i++){
         int badge_width=measure(p,keys[i],p->font_small)+12;
         if(badge_width<30)badge_width=30;
         int round=(!strcmp(keys[i],"A")||!strcmp(keys[i],"B")||
                    !strcmp(keys[i],"X")||!strcmp(keys[i],"Y"));
-        box_alpha(p,x,681,badge_width,28,ar,ag,ab,1.f,round?14:5);
-        text_center(p,keys[i],x,682,badge_width,p->font_small,.09f,.11f,.13f);
-        text_font(p,labels[i],x+badge_width+8,681,widths[i]-badge_width-8,
+        box_alpha(p,x,ftop+13,badge_width,28,ar,ag,ab,1.f,round?14:5);
+        text_center(p,keys[i],x,ftop+14,badge_width,p->font_small,.09f,.11f,.13f);
+        text_font(p,labels[i],x+badge_width+8,ftop+13,widths[i]-badge_width-8,
                   p->font_small,ar,ag,ab);
-        x+=widths[i]+12;
+        x+=widths[i]+gap;
     }
     /* Background download indicator using the same footer typography. */
     int download_percent=0; unsigned long long downloaded_bytes=0;
@@ -1444,13 +1516,13 @@ static void footer(Paint *p,const char *message) {
         if(download_percent>=0)
             snprintf(progress_label,sizeof(progress_label),"↓ %d%% · %d",download_percent/10,pending_downloads);
         else snprintf(progress_label,sizeof(progress_label),TR("↓ %u МБ · %d","↓ %u MB · %d"),(unsigned)(downloaded_bytes>>20),pending_downloads);
-        text_font(p,progress_label,250,682,175,p->font_small,ar,ag,ab);
+        text_font(p,progress_label,UI_COMPACT?154:250,ftop+14,165,p->font_small,ar,ag,ab);
     }
     /* Notification occupies its own safe zone, never the last selectable row. */
     if(message && *message && !offline_catalog_status(message) &&
        strncmp(message,"A:",2) && strncmp(message,"B:",2)){
-        box_alpha(p,UI_EDGE,617,1216,43,.11f,.16f,.19f,.98f,11);
-        text_small(p,message,50,626,1170);
+        box_alpha(p,UI_EDGE,ftop-51,UI_CONTENT_W,43,.11f,.16f,.19f,.98f,11);
+        text_small(p,message,UI_EDGE+18,ftop-42,UI_CONTENT_W-36);
     }
 }
 static void poster(Paint *p,const Movie *movie,int x,int y,int width,int height,int *budget) {
@@ -1480,8 +1552,8 @@ static void draw_poster_row(Paint *p,const Movie *movies,int count,int offset,in
     int first=offset/POSTER_STEP-1;
     if(first<0)first=0;
     for(int i=first;i<count && i<first+POSTER_COLUMNS+3;i++){
-        int x=53+i*POSTER_STEP-offset;
-        if(x+164<=UI_EDGE || x>=1280-UI_EDGE)continue;
+        int x=POSTER_ROW_X+i*POSTER_STEP-offset;
+        if(x+164<=UI_EDGE || x>=ui_w-UI_EDGE)continue;
         if(i==chosen)selection_frame(p,x,y,150,221);
         poster(p,&movies[i],x,y,150,221,budget);
         card_title(p,movies[i].title,x,y+224,164);
@@ -1497,11 +1569,11 @@ static void draw_poster_grid(Paint *p,const Movie *movies,int count,int chosen,i
     int limit=count?(count-1)/GRID_ITEMS*GRID_PAGE_STEP:0;
     int offset=scroll_offset(&content_motion,target,touch_drag(CATALOG,2,top,bottom),
                              limit,GRID_PAGE_STEP);
-    paint_clip(p,0,top-5,1280,bottom-top+8);
+    paint_clip(p,0,top-5,ui_w,bottom-top+8);
     int first=(offset/GRID_PAGE_STEP-1)*GRID_ITEMS;
     if(first<0)first=0;
     for(int i=first;i<count && i<first+3*GRID_ITEMS;i++){
-        int k=i%GRID_ITEMS,x=54+k%POSTER_COLUMNS*POSTER_STEP;
+        int k=i%GRID_ITEMS,x=POSTER_GRID_X+k%POSTER_COLUMNS*POSTER_STEP;
         int y=top+k/POSTER_COLUMNS*(library?245:246)+i/GRID_ITEMS*GRID_PAGE_STEP-offset;
         if(y+255<top || y>=bottom)continue;
         if(i==chosen && (!library || !catalog_hero_focus))selection_frame(p,x,y,138,206);
@@ -1517,7 +1589,7 @@ static int list_offset(Paint *p,Page page,int selected,int count){
     int target=selected/UI_ROWS*UI_ROWS*UI_ROW_STEP;
     int limit=count?(count-1)/UI_ROWS*UI_ROWS*UI_ROW_STEP:0;
     int bottom=UI_ROW_Y+UI_ROWS*UI_ROW_STEP;
-    paint_clip(p,0,UI_ROW_Y-5,1280,bottom-UI_ROW_Y+5);
+    paint_clip(p,0,UI_ROW_Y-5,ui_w,bottom-UI_ROW_Y+5);
     return scroll_offset(&content_motion,target,touch_drag(page,2,UI_ROW_Y,bottom),
                          limit,UI_ROWS*UI_ROW_STEP);
 }
@@ -1528,9 +1600,10 @@ static int first_visible_row(int offset){
 }
 
 static int touched_grid_poster(int x,int y,int top,int row_step,int bottom){
-    if(x<54 || y<top-5 || y>=bottom)return -1;
-    int col=(x-54)/POSTER_STEP;
-    if(col>=POSTER_COLUMNS || (x-54)%POSTER_STEP>=138)return -1;
+    int gx=POSTER_GRID_X;
+    if(x<gx || y<top-5 || y>=bottom)return -1;
+    int col=(x-gx)/POSTER_STEP;
+    if(col>=POSTER_COLUMNS || (x-gx)%POSTER_STEP>=138)return -1;
     int absolute_y=y-top+(int)lroundf(content_motion.position);
     if(absolute_y<0)return -1;
     int within_page=absolute_y%GRID_PAGE_STEP;
@@ -1540,7 +1613,7 @@ static int touched_grid_poster(int x,int y,int top,int row_step,int bottom){
 }
 
 static int touched_list_row(int x,int y){
-    if(x<UI_EDGE || x>=1280-UI_EDGE || y<UI_ROW_Y-5 || y>=UI_ROW_Y+UI_ROWS*UI_ROW_STEP)
+    if(x<UI_EDGE || x>=ui_w-UI_EDGE || y<UI_ROW_Y-5 || y>=UI_ROW_Y+UI_ROWS*UI_ROW_STEP)
         return -1;
     int absolute_y=y-UI_ROW_Y+(int)lroundf(content_motion.position);
     if(absolute_y<0 || absolute_y%UI_ROW_STEP>=UI_ROW_HEIGHT)return -1;
@@ -1576,12 +1649,12 @@ static void format_details_metadata(char *text,size_t size,const Movie *movie,co
 }
 static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                  Source *sources,int sn,int source,const char *heading,const char *status) {
-    glViewport(0,0,1280,720);
+    glViewport(0,0,fb_w,fb_h);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     ui_theme_enabled=1;
     ui_gradient_pass=1;
-    box_alpha(p,0,0,1280,720,.034f,.042f,.054f,1.f,0);
+    box_alpha(p,0,0,ui_w,ui_h,.034f,.042f,.054f,1.f,0);
     ui_gradient_pass=0;
     static int previous_page=-1,previous_category=-1,previous_expanded=-1;
     static int previous_sort=-1,painted_shelf=-1,old_shelf_offset=0;
@@ -1607,11 +1680,13 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
     footer_page=page;
     int poster_budget=1;
     if (page==CATALOG) {
-        box_alpha(p,0,0,1280,80,.059f,.070f,.081f,1.f,0);
-        headline(p,"UAPlay",25,18,166);
+        box_alpha(p,0,0,ui_w,80,.059f,.070f,.081f,1.f,0);
+        headline(p,"UAPlay",UI_COMPACT?18:25,18,UI_COMPACT?122:166);
         const char *tabs[]={TR("Головна","Home"),TR("Серіали","TV Shows"),TR("Фільми","Movies"),TR("Мультфільми","Animation"),TR("Вибране","Favorites")};
-        const int tab_x[]={205,307,410,502,650};
-        const int tab_w[]={96,95,89,144,106};
+        const int wide_tab_x[]={193,295,398,490,638},wide_tab_w[]={96,95,89,144,106};
+        const int compact_tab_x[]={144,238,330,416,556},compact_tab_w[]={90,88,82,136,96};
+        const int *tab_x=UI_COMPACT?compact_tab_x:wide_tab_x;
+        const int *tab_w=UI_COMPACT?compact_tab_w:wide_tab_w;
         for(int i=0;i<5;i++){
             int x=tab_x[i];
             int active=(i==0 && ui_category==0) ||
@@ -1619,60 +1694,69 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                        (i==2 && ui_category>=2 && ui_category<=10) ||
                        (i==3 && ui_category>=ANIMATION_FIRST && ui_category<=ANIMATION_LAST) ||
                        (i==4 && (ui_category==11 || ui_category==12));
-            if(active)box_alpha(p,x-12,19,tab_w[i],43,.19f,.24f,.28f,1.f,16);
-            if(catalog_hero_focus==i+7)selection_frame(p,x-12,19,tab_w[i],43);
-            text_center_button(p,tabs[i],x-12,19,tab_w[i],43,
+            if(active)box_alpha(p,x,19,tab_w[i],43,.19f,.24f,.28f,1.f,16);
+            if(catalog_hero_focus==i+7)selection_frame(p,x,19,tab_w[i],43);
+            text_center_button(p,tabs[i],x,19,tab_w[i],43,
                                p->font_small,.96f,.97f,.99f);
-            press_preview(p,x-12,19,tab_w[i],43,16);
+            press_preview(p,x,19,tab_w[i],43,16);
         }
         /* Search is a real touch target, not a missing Unicode glyph. */
-        box_alpha(p,767,17,277,47,.13f,.16f,.19f,1.f,15);
-        if(catalog_hero_focus==5)selection_frame(p,767,17,277,47);
-        search_icon(p,800,38,.13f,.16f,.19f);
-        text_font(p,TR("Пошук","Search"),831,17+(47-text_height(p,TR("Пошук","Search"),p->font_small))/2,
-                  177,p->font_small,1.f,1.f,1.f);
-        press_preview(p,767,17,277,47,15);
-        box_alpha(p,1058,17,53,47,.13f,.16f,.19f,1.f,15);
-        if(catalog_hero_focus==6)selection_frame(p,1058,17,53,47);
-        gear_icon(p,1085,40,.13f,.16f,.19f);
-        press_preview(p,1058,17,53,47,15);
+        int search_x=UI_COMPACT?662:767,search_w=UI_COMPACT?148:277;
+        int gear_x=UI_COMPACT?818:1058,gear_w=UI_COMPACT?50:53;
+        int clock_x=UI_COMPACT?876:1116,clock_w=UI_COMPACT?98:106;
+        box_alpha(p,search_x,17,search_w,47,.13f,.16f,.19f,1.f,15);
+        if(catalog_hero_focus==5)selection_frame(p,search_x,17,search_w,47);
+        search_icon(p,search_x+(UI_COMPACT?26:33),38,.13f,.16f,.19f);
+        text_font(p,TR("Пошук","Search"),search_x+(UI_COMPACT?52:64),
+                  17+(47-text_height(p,TR("Пошук","Search"),p->font_small))/2,
+                  search_w-(UI_COMPACT?60:100),p->font_small,1.f,1.f,1.f);
+        press_preview(p,search_x,17,search_w,47,15);
+        box_alpha(p,gear_x,17,gear_w,47,.13f,.16f,.19f,1.f,15);
+        if(catalog_hero_focus==6)selection_frame(p,gear_x,17,gear_w,47);
+        gear_icon(p,gear_x+gear_w/2,40,.13f,.16f,.19f);
+        press_preview(p,gear_x,17,gear_w,47,15);
         time_t now=time(NULL);
         struct tm *local=localtime(&now);
         char clock_label[32]="--:--";
         if(local)strftime(clock_label,sizeof(clock_label),"%H:%M",local);
-        text_font(p,clock_label,1116,18,106,
+        text_font(p,clock_label,clock_x,18,clock_w,
                   p->font_clock?p->font_clock:p->font_big,.95f,.97f,.99f);
         if(ui_category==11 || ui_category==12){
             /* Favorites uses a poster-only library layout, without the hero.
                Both tabs stay reachable even when their list is empty. */
             const char *names[]={TR("На майбутнє","Watchlist"),TR("Історія","History"),TR("Завантажені","Downloads")};
-            const int tab_x[]={32,244,417},tab_w[]={196,158,208};
+            const int ltab_x[]={UI_EDGE,UI_EDGE+208,UI_EDGE+378},ltab_w[]={196,158,208};
             for(int i=0;i<3;i++){
                 int selected=i<2 && ui_category==11+i;
-                box_alpha(p,tab_x[i],101,tab_w[i],47,
+                box_alpha(p,ltab_x[i],101,ltab_w[i],47,
                           selected?.20f:.12f,selected?.28f:.15f,
                           selected?.35f:.19f,1.f,13);
                 if(catalog_hero_focus==16+i)
-                    selection_frame(p,tab_x[i],101,tab_w[i],47);
-                text_center_button(p,names[i],tab_x[i],101,tab_w[i],47,
+                    selection_frame(p,ltab_x[i],101,ltab_w[i],47);
+                text_center_button(p,names[i],ltab_x[i],101,ltab_w[i],47,
                                    p->font_small,.96f,.97f,.99f);
-                press_preview(p,tab_x[i],101,tab_w[i],47,13);
+                press_preview(p,ltab_x[i],101,ltab_w[i],47,13);
             }
             if(ui_category==12){
+                int clear_x=ui_w-UI_EDGE-266;
                 if(catalog_hero_focus==19)
-                    selection_frame(p,982,101,266,47);
+                    selection_frame(p,clear_x,101,266,47);
                 button(p,clear_history_confirm?TR("Підтвердити очищення","Confirm clearing"):
-                       TR("Очистити історію","Clear history"),982,101,266,47,0);
+                       TR("Очистити історію","Clear history"),clear_x,101,266,47,0);
             }
             if(!n){
-                text_center_button(p,TR("Тут нічого немає","Nothing here yet"),UI_EDGE,305,1216,110,
+                text_center_button(p,TR("Тут нічого немає","Nothing here yet"),UI_EDGE,305,UI_CONTENT_W,110,
                                    p->font_big,.73f,.77f,.82f);
             }
             draw_poster_grid(p,movies,n,chosen,1,&poster_budget);
         }else if(expanded_catalog){
-            headline(p,heading,UI_EDGE,97,960);
+            int back_w=142,back_x=ui_w-UI_EDGE-back_w;
+            const int sort_w[]={132,159};
+            int sort_x1=back_x-(UI_COMPACT?12:19)-sort_w[1];
+            int sort_x0=sort_x1-11-sort_w[0];
+            int sort_x[2]={sort_x0,sort_x1};
+            headline(p,heading,UI_EDGE,97,sort_x0-UI_EDGE-16);
             const char *sort_labels[]={TR("Рейтинг","Rating"),TR("Популярність","Popularity")};
-            const int sort_x[]={785,928},sort_w[]={132,159};
             for(int i=0;i<2;i++){
                 int active=catalog_sort_mode==sort_mode_for_button(i);
                 box_alpha(p,sort_x[i],98,sort_w[i],44,
@@ -1685,40 +1769,42 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                                    p->font_small,.96f,.97f,.99f);
                 press_preview(p,sort_x[i],98,sort_w[i],44,12);
             }
-            if(catalog_hero_focus==14)selection_frame(p,1106,98,142,44);
-            button(p,TR("‹  Назад","‹  Back"),1106,98,142,44,0);
+            if(catalog_hero_focus==14)selection_frame(p,back_x,98,back_w,44);
+            button(p,TR("‹  Назад","‹  Back"),back_x,98,back_w,44,0);
             draw_poster_grid(p,movies,n,chosen,0,&poster_budget);
-            if(n)text_muted(p,movies[chosen].title,54,635,1150);
+            if(n)text_muted(p,movies[chosen].title,POSTER_GRID_X,ui_h-85,UI_CONTENT_W-40);
         }else{
             int active=chosen>=0 && chosen<n?chosen:0;
-            enum { HERO_Y=92, HERO_W=1216, HERO_H=222, HERO_PAD=12,
+            enum { HERO_Y=92, HERO_H=222, HERO_PAD=12,
                    HERO_POSTER_W=132, HERO_BUTTON_H=50, HERO_BUTTON_GAP=12 };
+            const int hero_w=UI_CONTENT_W;
             const int hero_left=UI_EDGE+HERO_PAD;
             const int hero_top=HERO_Y+HERO_PAD;
             const int hero_bottom=HERO_Y+HERO_H-HERO_PAD;
-            const int hero_poster_x=UI_EDGE+HERO_W-HERO_PAD-HERO_POSTER_W;
+            const int hero_poster_x=UI_EDGE+hero_w-HERO_PAD-HERO_POSTER_W;
+            const int hero_text_w=hero_poster_x-hero_left-20;
             const int hero_button_y=hero_bottom-HERO_BUTTON_H;
             const int hero_favorite_x=hero_left+205+HERO_BUTTON_GAP;
-            box_alpha(p,UI_EDGE,HERO_Y,HERO_W,HERO_H,.09f,.11f,.14f,1.f,22);
+            box_alpha(p,UI_EDGE,HERO_Y,hero_w,HERO_H,.09f,.11f,.14f,1.f,22);
             if(n){
                 /* All four inner edges use the same 12px inset, following
                    the user's corrected Switch-style reference layout. */
                 poster(p,&movies[active],hero_poster_x,hero_top,
                        HERO_POSTER_W,hero_bottom-hero_top,&poster_budget);
-                headline(p,movies[active].title,hero_left,hero_top,967);
+                headline(p,movies[active].title,hero_left,hero_top,hero_text_w);
                 char tag[110];
                 snprintf(tag,sizeof(tag),"%s  ·  %s",movies[active].year,
                          movies[active].series?TR("Серіал","TV Show"):TR("Фільм","Movie"));
-                text_muted(p,tag,hero_left,hero_top+50,890);
-                wrapped(p,movies[active].overview,hero_left,hero_top+90,949,2,27,
+                text_muted(p,tag,hero_left,hero_top+50,hero_text_w-20);
+                wrapped(p,movies[active].overview,hero_left,hero_top+90,hero_text_w-10,2,27,
                         p->font_small,.74f,.79f,.84f);
             }else{
                 int loading=ui_category==0 && home_cache_initialized && !home_current_loaded;
                 headline(p,loading?TR("Завантаження добірки...","Loading collection..."):TR("Не знайдено матеріалів","No titles found"),
-                         hero_left,hero_top+14,900);
+                         hero_left,hero_top+14,hero_text_w);
                 text_muted(p,loading?TR("Зачекайте, отримуємо матеріали","Fetching titles…"):
                            TR("Спробуйте інший розділ або пошуковий запит","Try another section or search term"),
-                           hero_left,hero_top+78,920);
+                           hero_left,hero_top+78,hero_text_w);
             }
             if(n && catalog_hero_focus==1)
                 selection_frame(p,hero_left,hero_button_y,205,HERO_BUTTON_H);
@@ -1730,11 +1816,15 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                        TR("✓  У вибраному","✓  In favorites"):TR("+  У вибране","+  Add to favorites"),hero_favorite_x,hero_button_y,
                        218,HERO_BUTTON_H,0);
             }
+            int all_w=UI_COMPACT?124:138,all_x=ui_w-UI_EDGE-all_w;
             int section_tabs=subsection_count(ui_category);
             if(section_tabs){
                 const char *animation_tabs[]={TR("Мультфільми","Animation"),TR("Мультсеріали","Animated series"),TR("Аніме","Anime")};
-                const int anim_x[]={32,240,465},anim_w[]={191,208,134};
-                const int film_x[]={32,197,373,513,672},film_w[]={157,168,132,151,225};
+                const int anim_x[]={UI_EDGE,UI_EDGE+204,UI_EDGE+424},anim_w[]={191,208,134};
+                const int wide_film_x[]={32,197,373,513,672},wide_film_w[]={157,168,132,151,225};
+                const int compact_film_x[]={24,174,322,442,584},compact_film_w[]={144,142,114,136,196};
+                const int *film_x=UI_COMPACT?compact_film_x:wide_film_x;
+                const int *film_w=UI_COMPACT?compact_film_w:wide_film_w;
                 int films=tab_for_category(ui_category)==2;
                 for(int i=0;i<section_tabs;i++){
                     int selected=ui_category==category_for_subsection(ui_category,i);
@@ -1749,11 +1839,11 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                                        .96f,.97f,.99f);
                     press_preview(p,x,328,w,43,13);
                 }
-            }else text(p,heading,UI_EDGE,336,930);
+            }else text(p,heading,UI_EDGE,336,all_x-UI_EDGE-90);
             if(offline_catalog_status(status))
-                text_tiny(p,TR("Офлайн","Offline"),1026,340,77);
-            if(n && catalog_hero_focus==3)selection_frame(p,1110,329,138,42);
-            button(p,ui_category==0?TR("Більше  ›","More  ›"):TR("Усі  ›","All  ›"),1110,329,138,42,0);
+                text_tiny(p,TR("Офлайн","Offline"),all_x-84,340,77);
+            if(n && catalog_hero_focus==3)selection_frame(p,all_x,329,all_w,42);
+            button(p,ui_category==0?TR("Більше  ›","More  ›"):TR("Усі  ›","All  ›"),all_x,329,all_w,42,0);
             int home=ui_category==0;
             int target=poster_row_start(chosen,home)*POSTER_STEP;
             int max_start=home?(n>POSTER_COLUMNS?n-POSTER_COLUMNS:0):
@@ -1770,12 +1860,12 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                                      touch_drag(CATALOG,1,POSTER_ROW_Y,POSTER_ROW_BOTTOM),
                                      max_start*POSTER_STEP,
                                      (POSTER_COLUMNS-!home)*POSTER_STEP);
-            paint_clip(p,UI_EDGE,POSTER_ROW_Y-5,1280-2*UI_EDGE,
+            paint_clip(p,UI_EDGE,POSTER_ROW_Y-5,UI_CONTENT_W,
                        POSTER_ROW_BOTTOM-POSTER_ROW_Y+5);
             int y=POSTER_ROW_Y+(home?home_shelf*SHELF_STEP-shelf_offset:0);
             draw_poster_row(p,movies,n,offset,y,catalog_hero_focus?-1:chosen,&poster_budget);
             if(home && shelf_offset!=home_shelf*SHELF_STEP){
-                static Movie preview[POSTER_COLUMNS+1];
+                static Movie preview[MAX_POSTER_COLUMNS+1];
                 int other=shelf_offset/SHELF_STEP;
                 if(other==home_shelf)other++;
                 int preview_offset=shelf_motion.dragging?0:old_shelf_offset;
@@ -1791,28 +1881,35 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
         screen_header(p,TR("Налаштування","Settings"),"UAPlay");
         const char *items[]={TR("Тема","Theme"),TR("Інтерфейс","Appearance"),
             TR("Плеєр","Player"),TR("Автовідтворення","Autoplay"),TR("Джерела","Providers"),
-            TR("Мова / Language","Language / Мова")};
+            TR("Мова / Language","Language / Мова")
+#ifdef __TRIMUI__
+            ,TR("Вихід","Exit")
+#endif
+        };
+        int left_w=UI_COMPACT?336:417;
         for(int i=0;i<SETTING_COUNT;i++){
             int y=SETTINGS_Y+i*SETTINGS_ROW_STEP;
-            box_alpha(p,32,y,417,SETTINGS_ROW_HEIGHT,i==settings_selected?.20f:.09f,
+            box_alpha(p,UI_EDGE,y,left_w,SETTINGS_ROW_HEIGHT,i==settings_selected?.20f:.09f,
                       i==settings_selected?.29f:.11f,
                       i==settings_selected?.37f:.14f,1.f,16);
             if(i==settings_selected){float r,g,b;accent(&r,&g,&b);
-                box_alpha(p,32,y+11,5,42,r,g,b,1.f,2);}
+                box_alpha(p,UI_EDGE,y+10,5,SETTINGS_ROW_HEIGHT-20,r,g,b,1.f,2);}
             int label_y=y+(SETTINGS_ROW_HEIGHT-text_height(p,items[i],p->font))/2;
             if(i==settings_selected){
                 float r,g,b;accent(&r,&g,&b);
-                text_font(p,items[i],55,label_y,372,p->font,r,g,b);
-                selection_frame(p,32,y,417,SETTINGS_ROW_HEIGHT);
-            }else text(p,items[i],55,label_y,372);
-            press_preview(p,32,y,417,SETTINGS_ROW_HEIGHT,16);
+                text_font(p,items[i],UI_EDGE+23,label_y,left_w-40,p->font,r,g,b);
+                selection_frame(p,UI_EDGE,y,left_w,SETTINGS_ROW_HEIGHT);
+            }else text(p,items[i],UI_EDGE+23,label_y,left_w-40);
+            press_preview(p,UI_EDGE,y,left_w,SETTINGS_ROW_HEIGHT,16);
         }
-        box_alpha(p,475,136,773,480,.10f,.12f,.15f,1.f,20);
-        headline(p,items[settings_selected],513,174,685);
+        int rx=UI_EDGE+left_w+24,rw=ui_w-UI_EDGE-rx,rh=UI_FOOTER_TOP-136-32;
+        if(rh<480)rh=480;
+        box_alpha(p,rx,136,rw,rh,.10f,.12f,.15f,1.f,20);
+        headline(p,items[settings_selected],rx+36,174,rw-72);
         char description[240];
         if(settings_selected==SETTING_THEME)snprintf(description,sizeof(description),TR("Оформлення: %s","Theme: %s"),ui_light_theme?TR("Світла тема","Light"):TR("Темна тема","Dark"));
         else if(settings_selected==SETTING_INTERFACE){
-            if(ui_light_theme)snprintf(description,sizeof(description),TR("Акцент світлої теми: синій Nintendo Switch","Light theme accent: Nintendo Switch blue"));
+            if(ui_light_theme)snprintf(description,sizeof(description),TR("Акцент світлої теми: синій","Light theme accent: blue"));
             else snprintf(description,sizeof(description),TR("Акцент: %s","Accent: %s"),ui_accent_alt?TR("Блакитний","Light blue"):TR("Бірюзовий","Turquoise"));
         }
         else if(settings_selected==SETTING_PLAYER)snprintf(description,sizeof(description),TR("Швидкість: %.2f · гучність: %.0f","Speed: %.2f · Volume: %.0f"),video_options[0],video_options[1]);
@@ -1820,51 +1917,67 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
             snprintf(description,sizeof(description),TR("Наступна серія: %s","Next episode: %s"),autoplay_episodes?TR("Автоматично","Automatic"):TR("Вручну","Manual"));
         else if(settings_selected==SETTING_LANGUAGE)
             snprintf(description,sizeof(description),"%s",TR("Українська","English"));
+#ifdef __TRIMUI__
+        else if(settings_selected==SETTING_EXIT)
+            snprintf(description,sizeof(description),"%s",TR("Повернення до меню NextUI","Return to NextUI menu"));
+#endif
         else description[0]=0;
-        text(p,description,516,255,682);
+        text(p,description,rx+38,255,rw-76);
         const char *help[]={TR("Перемикає темну та світлу теми. Вибір зберігається на SD-карті.","Switch between dark and light themes. Your choice is saved to the SD card."),
             TR("Змінює колір виділення на всіх екранах.","Change the highlight color across the app."),
             TR("Налаштуйте відео, гучність та субтитри.","Adjust playback, volume, and subtitles."),
             TR("Після завершення серії пропонує наступну через 3 секунди. Кнопка B скасовує перехід. Вибір зберігається.","Start the next episode after 3 seconds. Press B to cancel. Your choice is saved."),
             TR("Виберіть джерела, у яких UAPlay може шукати відео. Вибір зберігається на SD-карті.","Choose which providers UAPlay can search. Your choices are saved to the SD card."),
-            TR("Змінює мову інтерфейсу, назв і описів TMDb.","Changes the language of the interface and TMDb titles and descriptions.")};
-        wrapped(p,help[settings_selected],517,315,675,3,29,p->font_small,.73f,.78f,.84f);
+            TR("Змінює мову інтерфейсу, назв і описів TMDb.","Changes the language of the interface and TMDb titles and descriptions.")
+#ifdef __TRIMUI__
+            ,TR("Закриває UAPlay та повертає вас у головне меню консолі. Також можна натиснути START у каталозі.","Closes UAPlay and returns to the launcher. You can also press START on the catalog screen.")
+#endif
+        };
+        wrapped(p,help[settings_selected],rx+38,315,rw-76,4,29,p->font_small,.73f,.78f,.84f);
         button(p,settings_selected==SETTING_PLAYER?TR("Відкрити параметри","Open player settings"):
                settings_selected==SETTING_PROVIDERS?TR("Відкрити джерела","Manage providers"):
+#ifdef __TRIMUI__
+               settings_selected==SETTING_EXIT?TR("Вийти з UAPlay","Exit UAPlay"):
+#endif
                settings_selected==SETTING_LANGUAGE?TR("English","Українська"):TR("Змінити","Change"),
-               515,537,258,55,1);
+               rx+38,136+rh-79,258,55,1);
         footer(p,status);
     } else if (page==DETAILS) {
         screen_header(p,movies[chosen].series?TR("Про серіал","About the show"):TR("Про фільм","About the movie"),"UAPlay");
-        enum { DETAILS_X=32, DETAILS_Y=109, DETAILS_W=1216, DETAILS_H=507,
+        enum { DETAILS_Y=109, DETAILS_H=507,
                DETAILS_PAD=14, DETAILS_POSTER_H=DETAILS_H-2*DETAILS_PAD,
-               DETAILS_POSTER_W=DETAILS_POSTER_H*2/3,
-               DETAILS_POSTER_X=DETAILS_X+DETAILS_W-DETAILS_PAD-DETAILS_POSTER_W };
-        box_alpha(p,DETAILS_X,DETAILS_Y,DETAILS_W,DETAILS_H,.09f,.11f,.14f,1.f,21);
+               DETAILS_POSTER_W=DETAILS_POSTER_H*2/3 };
+        const int details_x=UI_EDGE,details_w=UI_CONTENT_W;
+        const int details_poster_x=details_x+details_w-DETAILS_PAD-DETAILS_POSTER_W;
+        const int text_x=details_x+32;
+        const int text_w=details_poster_x-text_x-24;
+        box_alpha(p,details_x,DETAILS_Y,details_w,DETAILS_H,.09f,.11f,.14f,1.f,21);
         /* Original 2:3 poster ratio, with identical 14 px gaps on the top,
            right and bottom edges of the information panel. */
-        poster(p,&movies[chosen],DETAILS_POSTER_X,DETAILS_Y+DETAILS_PAD,
+        poster(p,&movies[chosen],details_poster_x,DETAILS_Y+DETAILS_PAD,
                DETAILS_POSTER_W,DETAILS_POSTER_H,&poster_budget);
-        headline(p,movies[chosen].title,65,138,820);
-        text_muted(p,movies[chosen].original,67,198,815);
+        headline(p,movies[chosen].title,text_x,138,text_w);
+        text_muted(p,movies[chosen].original,text_x+2,198,text_w);
         char tag[192];
         const Movie *selected=&movies[chosen];
         format_details_metadata(tag,sizeof(tag),selected,
                                 selected->id==displayed_genre_id?displayed_genre:"");
-        text(p,tag,66,259,815);
-        summary(p,movies[chosen].overview,66,313,815);
-        if(!details_button_focus)selection_frame(p,65,526,238,58);
-        else selection_frame(p,320,526,255,58);
-        button(p,TR("▶  Дивитися","▶  Watch"),65,526,238,58,1);
+        text(p,tag,text_x+1,259,text_w);
+        summary(p,movies[chosen].overview,text_x+1,313,text_w);
+        int watch_w=UI_COMPACT?224:238,fav_w=UI_COMPACT?240:255;
+        int fav_x=text_x+watch_w+14;
+        if(!details_button_focus)selection_frame(p,text_x,526,watch_w,58);
+        else selection_frame(p,fav_x,526,fav_w,58);
+        button(p,TR("▶  Дивитися","▶  Watch"),text_x,526,watch_w,58,1);
         button(p,library_favorite(&movies[chosen])?TR("✓  У вибраному","✓  In favorites"):TR("+  У вибране","+  Add to favorites"),
-               320,526,255,58,0);
+               fav_x,526,fav_w,58,0);
         footer(p,status);
     } else if (page==PROVIDERS || page==PROVIDER_SETTINGS) {
         int configuring=page==PROVIDER_SETTINGS;
         screen_header(p,configuring?TR("Джерела","Providers"):TR("Оберіть джерело","Choose a provider"),NULL);
         if(!configuring && !enabled_providers)
             text_center_button(p,TR("Увімкніть джерело в Налаштуваннях → Джерела","Enable a provider in Settings → Providers"),
-                               UI_EDGE,305,1216,110,p->font_small,.73f,.77f,.82f);
+                               UI_EDGE,305,UI_CONTENT_W,110,p->font_small,.73f,.77f,.82f);
         int row=0;
         for(int i=0;i<PROVIDER_COUNT;i++){
             int enabled=(enabled_providers & (1u<<i))!=0;
@@ -1878,7 +1991,7 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
     } else if (page==SOURCES) {
         screen_header(p,TR("Джерела відео","Video sources"),NULL);
         if(!sn)
-            text_center_button(p,TR("Нічого не знайдено","No results found"),UI_EDGE,305,1216,110,
+            text_center_button(p,TR("Нічого не знайдено","No results found"),UI_EDGE,305,UI_CONTENT_W,110,
                                p->font_big,.73f,.77f,.82f);
         int offset=list_offset(p,page,source,sn),first=first_visible_row(offset);
         for(int i=first;i<sn && i<first+UI_ROWS+2;i++){
@@ -1893,7 +2006,7 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
         footer_total=count;
         screen_header(p,TR("Завантажені","Downloads"),TR("Збережені фільми та серії","Saved movies and episodes"));
         if(!count)text_center_button(p,TR("Список порожній. Натисніть Y на джерелі або серії","No downloads yet. Press Y on a source or an episode."),
-                                      UI_EDGE,305,1216,110,p->font_small,.73f,.77f,.82f);
+                                      UI_EDGE,305,UI_CONTENT_W,110,p->font_small,.73f,.77f,.82f);
         int offset=list_offset(p,page,download_selected,count),first=first_visible_row(offset);
         for(int i=first;i<count && i<first+UI_ROWS+2;i++){
             const DownloadInfo *d=&records[i];
@@ -1915,7 +2028,7 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
             int y=UI_ROW_Y+i*UI_ROW_STEP-offset;
             list_row(p,name,y,i==download_selected,detail);
             if(d->state==DOWNLOAD_ACTIVE && d->permille>=0)
-                box_alpha(p,UI_EDGE+12,y+UI_ROW_HEIGHT-5,1192*d->permille/1000,
+                box_alpha(p,UI_EDGE+12,y+UI_ROW_HEIGHT-5,(UI_CONTENT_W-24)*d->permille/1000,
                           3,.30f,.71f,.81f,1.f,1);
         }
         paint_clip(p,0,0,0,0);
@@ -1958,14 +2071,14 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                      i==selected_track,tracks[i].selected?TR("Активна","Active"):NULL);
         }
         paint_clip(p,0,0,0,0);
-        if (!track_count) text_muted(p,TR("У цьому відео немає доступних доріжок","No tracks are available for this video"),60,200,1100);
+        if (!track_count) text_muted(p,TR("У цьому відео немає доступних доріжок","No tracks are available for this video"),UI_EDGE+24,200,UI_CONTENT_W-48);
         footer(p,status);
     } else if (page==SUBDL_PICKER) {
         screen_header(p,"SubDL",TR("Українська · English","Ukrainian · English"));
         if(subdl_job.thread){
             text_muted(p,subdl_job.downloading?
                        TR("Завантаження субтитрів…","Downloading subtitles…"):
-                       TR("Пошук субтитрів…","Searching for subtitles…"),60,200,1100);
+                       TR("Пошук субтитрів…","Searching for subtitles…"),UI_EDGE+24,200,UI_CONTENT_W-48);
         }else{
             int offset=list_offset(p,page,subdl_job.selected,subdl_job.count);
             int first=first_visible_row(offset);
@@ -1979,7 +2092,7 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
                 list_row(p,label,UI_ROW_Y+i*UI_ROW_STEP-offset,i==subdl_job.selected,NULL);
             }
             paint_clip(p,0,0,0,0);
-            if(subdl_job.error[0])text_muted(p,subdl_job.error,60,subdl_job.count?610:200,1150);
+            if(subdl_job.error[0])text_muted(p,subdl_job.error,UI_EDGE+24,subdl_job.count?UI_FOOTER_TOP-58:200,UI_CONTENT_W-48);
         }
         footer(p,NULL);
     } else if (page==VIDEO_SETTINGS) {
@@ -1987,12 +2100,12 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
         for(int i=0;i<VIDEO_OPTION_COUNT;i++) {
             int option=visible_video_options[i];
             int y=132+i*68;
-            box_alpha(p,UI_EDGE,y,1216,60,i==selected_video_option?.20f:.09f,
+            box_alpha(p,UI_EDGE,y,UI_CONTENT_W,60,i==selected_video_option?.20f:.09f,
                       i==selected_video_option?.30f:.11f,
                       i==selected_video_option?.38f:.14f,1.f,13);
-            text_font(p,ui_text(video_titles[option]),55,
+            text_font(p,ui_text(video_titles[option]),UI_EDGE+23,
                       y+(60-text_height(p,ui_text(video_titles[option]),p->font))/2,
-                      830,p->font,.96f,.97f,.98f);
+                      UI_CONTENT_W-290,p->font,.96f,.97f,.98f);
             char value[48];
             if(option==6){
                 int quality=(int)video_options[option];
@@ -2001,12 +2114,12 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
             else if(option==0)snprintf(value,sizeof(value),"%.2f",video_options[option]);
             else if(option==5)snprintf(value,sizeof(value),TR("%+.2f с","%+.2f s"),video_options[option]);
             else snprintf(value,sizeof(value),"%.0f",video_options[option]);
-            text_center_button(p,value,963,y,240,60,p->font,.95f,.96f,.98f);
+            text_center_button(p,value,ui_w-UI_EDGE-256,y,240,60,p->font,.95f,.96f,.98f);
             if(i==selected_video_option){float r,g,b;accent(&r,&g,&b);
                 box_alpha(p,UI_EDGE,y+12,4,36,r,g,b,1.f,2);}
-            press_preview(p,UI_EDGE,y,1216,60,13);
+            press_preview(p,UI_EDGE,y,UI_CONTENT_W,60,13);
         }
-        text_tiny(p,TR("Якість HLS визначається потоками, які надає джерело.","HLS quality depends on the streams offered by the provider."),50,626,1150);
+        text_tiny(p,TR("Якість HLS визначається потоками, які надає джерело.","HLS quality depends on the streams offered by the provider."),UI_EDGE+18,UI_FOOTER_TOP-42,UI_CONTENT_W-36);
         footer(p,NULL);
     }
     /* Short ease-out fade after a screen/section transition; fully drawn
@@ -2015,11 +2128,11 @@ static void draw(Paint *p,Page page,Movie *movies,int n,int chosen,
     if(elapsed<160){
         ui_animating=1;
         float remain=1.f-(float)elapsed/160.f;
-        box_alpha(p,0,80,1280,UI_FOOTER_TOP-80,.034f,.042f,.054f,
+        box_alpha(p,0,80,ui_w,UI_FOOTER_TOP-80,.034f,.042f,.054f,
                   .13f*remain*remain,0);
     }
     /* No battery on details, provider, source, season, episode or settings pages. */
-    if(page==CATALOG)battery_status_vertical(p,1218,27);
+    if(page==CATALOG)battery_status_vertical(p,UI_COMPACT?ui_w-42:1218,27);
 }
 static void command(mpv_handle *player,const char *verb,const char *arg) {
     const char *args[]={verb,arg,NULL};
@@ -2053,67 +2166,74 @@ static void draw_player_controls(Paint *p,mpv_handle *player,double offset) {
         pos+=offset;
         duration+=offset;
     }
-    glViewport(0,0,1280,720);
+    int panel_y=ui_h-213;
+    int bar_x=UI_COMPACT?112:126,bar_w=ui_w-2*bar_x;
+    int next_x=ui_w-93-252;
+    glViewport(0,0,fb_w,fb_h);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-    box_alpha(p,32,27,141,49,.045f,.063f,.079f,.92f,14);
-    text_center(p,TR("‹  Назад","‹  Back"),32,37,141,p->font_small,.96f,.97f,.99f);
+    box_alpha(p,UI_EDGE,27,141,49,.045f,.063f,.079f,.92f,14);
+    text_center(p,TR("‹  Назад","‹  Back"),UI_EDGE,37,141,p->font_small,.96f,.97f,.99f);
     if(active_episode_variant>=0 &&
        catalog_next_episode(episodes,episode_count,active_episode_variant)>=0){
-        box_alpha(p,869,27,241,49,.045f,.063f,.079f,.92f,14);
-        text_center(p,TR("»  Наступна серія","»  Next episode"),869,37,241,
+        box_alpha(p,next_x,27,241,49,.045f,.063f,.079f,.92f,14);
+        text_center(p,TR("»  Наступна серія","»  Next episode"),next_x,37,241,
                     p->font_small,.96f,.97f,.99f);
     }
-    box_alpha(p,0,507,1280,213,.027f,.034f,.044f,.93f,0);
-    text_tiny(p,TR("UAPlay  ·  Відтворення","UAPlay  ·  Playback"),35,519,430);
+    box_alpha(p,0,panel_y,ui_w,213,.027f,.034f,.044f,.93f,0);
+    text_tiny(p,TR("UAPlay  ·  Відтворення","UAPlay  ·  Playback"),UI_EDGE+4,panel_y+12,430);
     if(active_episode_variant>=0 &&
        catalog_next_episode(episodes,episode_count,active_episode_variant)>=0)
-        text_tiny(p,TR("L — Наступна серія","L — Next episode"),790,519,310);
-    box_alpha(p,126,566,1028,6,.34f,.39f,.44f,1.f,3);
-    int filled=duration>0?(int)(1028.0*pos/duration):0;
-    if(filled<0)filled=0;if(filled>1028)filled=1028;
-    if(filled>0)box_alpha(p,126,566,filled,6,.92f,.94f,.97f,1.f,3);
-    box_alpha(p,126+filled-8,559,16,20,.95f,.96f,.98f,1.f,8);
+        text_tiny(p,TR("L — Наступна серія","L — Next episode"),ui_w-330,panel_y+12,300);
+    box_alpha(p,bar_x,panel_y+59,bar_w,6,.34f,.39f,.44f,1.f,3);
+    int filled=duration>0?(int)((double)bar_w*pos/duration):0;
+    if(filled<0)filled=0;if(filled>bar_w)filled=bar_w;
+    if(filled>0)box_alpha(p,bar_x,panel_y+59,filled,6,.92f,.94f,.97f,1.f,3);
+    box_alpha(p,bar_x+filled-8,panel_y+52,16,20,.95f,.96f,.98f,1.f,8);
     char left[24],right[24];
     snprintf(left,sizeof(left),"%02d:%02d",(int)pos/60,(int)pos%60);
     snprintf(right,sizeof(right),"%02d:%02d",(int)duration/60,(int)duration%60);
-    text_small(p,left,35,552,85);
-    text_small(p,right,1167,552,88);
-    text_tiny(p,TR("↑↓ Гучність","↑↓ Volume"),67,606,190);
-    box_alpha(p,70,649,178,5,.35f,.42f,.52f,1.f,3);
+    text_small(p,left,UI_EDGE+4,panel_y+45,85);
+    text_small(p,right,bar_x+bar_w+12,panel_y+45,88);
+    int vol_x=UI_COMPACT?42:70,vol_w=UI_COMPACT?154:178;
+    text_tiny(p,TR("↑↓ Гучність","↑↓ Volume"),vol_x-3,panel_y+99,180);
+    box_alpha(p,vol_x,panel_y+142,vol_w,5,.35f,.42f,.52f,1.f,3);
     int volume=(int)video_options[1];
     if(volume<0)volume=0;if(volume>130)volume=130;
-    if(volume>0)box_alpha(p,70,649,volume*178/130,5,.92f,.94f,.97f,1.f,3);
-    box_alpha(p,70+volume*178/130-7,641,14,20,.96f,.97f,.98f,1.f,7);
+    if(volume>0)box_alpha(p,vol_x,panel_y+142,volume*vol_w/130,5,.92f,.94f,.97f,1.f,3);
+    box_alpha(p,vol_x+volume*vol_w/130-7,panel_y+134,14,20,.96f,.97f,.98f,1.f,7);
     char volume_label[24];snprintf(volume_label,sizeof(volume_label),"%d%%",volume);
-    text_tiny(p,volume_label,122,672,100);
+    text_tiny(p,volume_label,vol_x+vol_w/2-24,panel_y+165,100);
     const char *icons[]={"−10",paused?"▶":"Ⅱ","+10","","♪","CC"};
     const char *labels[]={TR("10 с назад","Back 10 s"),TR("Пауза / пуск","Play / pause"),TR("10 с вперед","Forward 10 s"),
                           TR("Параметри","Settings"),TR("Аудіо","Audio"),TR("Субтитри","Subtitles")};
+    int btn_y=panel_y+103;
     for(int i=0;i<6;i++){
         const int w=76;
-        int center=player_button_centers[i];
-        int inset=(int)lroundf(3.f*press_amount(center-w/2,610,w,58));
-        box_alpha(p,center-w/2+inset,610+inset,w-2*inset,58-2*inset,.18f,.22f,.26f,.94f,15);
-        text_center(p,icons[i],center-w/2,624,w,
+        int center=player_button_center(i);
+        int inset=(int)lroundf(3.f*press_amount(center-w/2,btn_y,w,58));
+        box_alpha(p,center-w/2+inset,btn_y+inset,w-2*inset,58-2*inset,.18f,.22f,.26f,.94f,15);
+        text_center(p,icons[i],center-w/2,btn_y+14,w,
                     i==0||i==2?p->font_small:p->font,.98f,.98f,.99f);
-        if(i==3)gear_icon(p,center,639,.18f,.22f,.26f);
-        text_center(p,labels[i],center-72,678,144,p->font_tiny,.78f,.84f,.89f);
+        if(i==3)gear_icon(p,center,btn_y+29,.18f,.22f,.26f);
+        text_center(p,labels[i],center-(UI_COMPACT?53:72),btn_y+68,UI_COMPACT?106:144,p->font_tiny,.78f,.84f,.89f);
     }
 }
 static void draw_next_episode_prompt(Paint *p,const Episode *next,int seconds){
     ui_theme_enabled=0;
-    box_alpha(p,0,0,1280,720,.012f,.018f,.027f,.88f,0);
-    box_alpha(p,242,190,796,341,.105f,.144f,.194f,.98f,24);
-    headline(p,TR("Наступна серія","Next episode"),282,223,700);
+    int card_w=UI_COMPACT?720:796,card_h=341;
+    int card_x=(ui_w-card_w)/2,card_y=(ui_h-card_h)/2;
+    box_alpha(p,0,0,ui_w,ui_h,.012f,.018f,.027f,.88f,0);
+    box_alpha(p,card_x,card_y,card_w,card_h,.105f,.144f,.194f,.98f,24);
+    headline(p,TR("Наступна серія","Next episode"),card_x+40,card_y+33,card_w-80);
     char episode_name[120];
     snprintf(episode_name,sizeof(episode_name),TR("Сезон %d · Серія %d","Season %d · Episode %d"),
              next->season,next->number);
-    text(p,episode_name,286,302,697);
+    text(p,episode_name,card_x+44,card_y+112,card_w-88);
     char timer[128];
     snprintf(timer,sizeof(timer),TR("Автозапуск через %d с","Starting in %d s"),seconds);
-    text_small(p,timer,286,376,681);
-    text_small(p,TR("A — дивитися зараз     B — скасувати","A — Watch now     B — Cancel"),286,448,690);
+    text_small(p,timer,card_x+44,card_y+186,card_w-88);
+    text_small(p,TR("A — дивитися зараз     B — скасувати","A — Watch now     B — Cancel"),card_x+44,card_y+258,card_w-88);
 }
 static int native_button(int button) {
     /* SDL uses Xbox-style face button names; Switch prints the opposite labels. */
@@ -2125,13 +2245,91 @@ static int native_button(int button) {
         default:return button;
     }
 }
-static void stick_arrow(SDL_GameController *pad,Uint32 *last_time,int *last_key) {
-    if(!pad || !SDL_GameControllerGetAttached(pad))return;
+/* TrimUI Brick / Smart Pro raw SDL_Joystick mapping (trimui_inputd):
+   0=B, 1=A, 2=Y, 3=X, 4=L1, 5=R1, 6=SELECT, 7=START, 8=MENU (15=MENU_ALT). */
+static int trimui_joy_button(int button) {
+    switch(button) {
+        case 0:return SDL_CONTROLLER_BUTTON_B;
+        case 1:return SDL_CONTROLLER_BUTTON_A;
+        case 2:return SDL_CONTROLLER_BUTTON_Y;
+        case 3:return SDL_CONTROLLER_BUTTON_X;
+        case 4:return SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
+        case 5:return SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+        case 6:return SDL_CONTROLLER_BUTTON_BACK;
+        case 7:return SDL_CONTROLLER_BUTTON_START;
+        case 8:
+        case 15:return SDL_CONTROLLER_BUTTON_BACK;
+        default:return -1;
+    }
+}
+static int hat_to_key(Uint8 hat) {
+    if(hat & SDL_HAT_UP)return SDLK_UP;
+    if(hat & SDL_HAT_DOWN)return SDLK_DOWN;
+    if(hat & SDL_HAT_LEFT)return SDLK_LEFT;
+    if(hat & SDL_HAT_RIGHT)return SDLK_RIGHT;
+    return 0;
+}
+static int hat_to_button(Uint8 hat) {
+    if(hat & SDL_HAT_UP)return SDL_CONTROLLER_BUTTON_DPAD_UP;
+    if(hat & SDL_HAT_DOWN)return SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+    if(hat & SDL_HAT_LEFT)return SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+    if(hat & SDL_HAT_RIGHT)return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+    return -1;
+}
+static void stick_arrow(SDL_GameController *pad,SDL_Joystick *joy,
+                        Uint32 *last_time,int *last_key,
+                        Uint32 *hat_pressed_at,Uint32 *hat_last_time,int *hat_last_key,
+                        int *l2_down,int *r2_down) {
     const int deadzone=19000;
-    int lx=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_LEFTX);
-    int ly=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_LEFTY);
-    int rx=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_RIGHTX);
-    int ry=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_RIGHTY);
+    int lx=0,ly=0,rx=0,ry=0;
+    if(pad && SDL_GameControllerGetAttached(pad)){
+        lx=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_LEFTX);
+        ly=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_LEFTY);
+        rx=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_RIGHTX);
+        ry=SDL_GameControllerGetAxis(pad,SDL_CONTROLLER_AXIS_RIGHTY);
+    }else if(joy && SDL_JoystickGetAttached(joy)){
+        int axes=SDL_JoystickNumAxes(joy);
+        if(axes>=2){
+            lx=SDL_JoystickGetAxis(joy,0);
+            ly=SDL_JoystickGetAxis(joy,1);
+        }
+        /* On tg5040: axis 2 = L2, axis 3 = RX, axis 4 = RY, axis 5 = R2. */
+        if(axes>=5){
+            rx=SDL_JoystickGetAxis(joy,3);
+            ry=SDL_JoystickGetAxis(joy,4);
+        }
+        if(axes>=3 && l2_down){
+            int pressed=SDL_JoystickGetAxis(joy,2)>16000;
+            if(pressed && !*l2_down){
+                SDL_Event ev={0};ev.type=SDL_JOYBUTTONDOWN;ev.jbutton.button=4;
+                SDL_PushEvent(&ev);
+            }
+            *l2_down=pressed;
+        }
+        if(axes>=6 && r2_down){
+            int pressed=SDL_JoystickGetAxis(joy,5)>16000;
+            if(pressed && !*r2_down){
+                SDL_Event ev={0};ev.type=SDL_JOYBUTTONDOWN;ev.jbutton.button=5;
+                SDL_PushEvent(&ev);
+            }
+            *r2_down=pressed;
+        }
+        if(SDL_JoystickNumHats(joy)>0 && hat_last_key){
+            int hkey=hat_to_key(SDL_JoystickGetHat(joy,0));
+            Uint32 now=SDL_GetTicks();
+            if(!hkey){
+                *hat_last_key=0;
+            }else if(hkey!=*hat_last_key){
+                *hat_last_key=hkey;
+                *hat_pressed_at=now;
+                *hat_last_time=now;
+            }else if(now-*hat_pressed_at>=280u && now-*hat_last_time>=90u){
+                *hat_last_time=now;
+                SDL_Event event={0};event.type=SDL_KEYDOWN;event.key.keysym.sym=hkey;
+                SDL_PushEvent(&event);
+            }
+        }
+    }
     int key=0;
     if(abs(ly)>deadzone || abs(lx)>deadzone)
         key=abs(ly)>=abs(lx)?(ly>0?SDLK_DOWN:SDLK_UP):(lx>0?SDLK_RIGHT:SDLK_LEFT);
@@ -2232,7 +2430,10 @@ static int retry_movy(mpv_handle *player,MovyPlayback *state,const char *url,
     *started=SDL_GetTicks();
     return 1;
 }
-static int keyboard(char *value,size_t size) {
+#ifdef __SWITCH__
+static int keyboard(Paint *p,SDL_Window *window,SDL_GameController *pad,
+                    SDL_Joystick **joy_ptr,char *value,size_t size) {
+    (void)p;(void)window;(void)pad;(void)joy_ptr;
     SwkbdConfig cfg;
     if(R_FAILED(swkbdCreate(&cfg,0))) return 0;
     swkbdConfigMakePresetDefault(&cfg);
@@ -2240,36 +2441,285 @@ static int keyboard(char *value,size_t size) {
     swkbdClose(&cfg);
     return R_SUCCEEDED(result) && value[0];
 }
+#else
+static void utf8_pop_char(char *buf){
+    size_t len=strlen(buf);
+    if(!len)return;
+    while(len>0 && ((unsigned char)buf[len-1] & 0xC0)==0x80)len--;
+    if(len>0)len--;
+    buf[len]=0;
+}
+static void utf8_append_str(char *buf,size_t size,const char *s){
+    if(!s || !*s || size<2)return;
+    size_t len=strlen(buf),add=strlen(s);
+    if(len+add<size){
+        memcpy(buf+len,s,add+1);
+    }
+}
+static int keyboard(Paint *p,SDL_Window *window,SDL_GameController *pad,
+                    SDL_Joystick **joy_ptr,char *value,size_t size) {
+    static const char *const uk_rows[4][11]={
+        {"1","2","3","4","5","6","7","8","9","0","'"},
+        {"й","ц","у","к","е","н","г","ш","щ","з","х"},
+        {"ф","і","в","а","п","р","о","л","д","ж","є"},
+        {"я","ч","с","м","и","т","ь","б","ю","ї","ґ"}
+    };
+    static const char *const en_rows[4][11]={
+        {"1","2","3","4","5","6","7","8","9","0","-"},
+        {"q","w","e","r","t","y","u","i","o","p","'"},
+        {"a","s","d","f","g","h","j","k","l",":","."},
+        {"z","x","c","v","b","n","m",",","!","?","/"}
+    };
+    static int lang_en=0;
+    if(ui_language()==UI_ENGLISH && !value[0])lang_en=1;
+    char buf[192]={0};
+    snprintf(buf,sizeof(buf),"%s",value);
+    int row=1,col=3,action_col=4;
+    Uint32 stick_t=0,hat_press_t=0,hat_rep_t=0;
+    int stick_k=0,hat_k=0,l2_d=0,r2_d=0;
+    SDL_StartTextInput();
+    int accepted=0,done=0;
+    while(!done){
+        Uint32 frame_t=SDL_GetTicks();
+        ui_now=frame_t;
+        stick_arrow(pad,joy_ptr?*joy_ptr:NULL,&stick_t,&stick_k,
+                    &hat_press_t,&hat_rep_t,&hat_k,&l2_d,&r2_d);
+        SDL_Event e;
+        while(SDL_PollEvent(&e)){
+            if(e.type==SDL_QUIT){
+                SDL_PushEvent(&e);
+                done=1;accepted=0;break;
+            }
+            if(e.type==SDL_JOYDEVICEADDED && joy_ptr && !*joy_ptr && !pad){
+                *joy_ptr=SDL_JoystickOpen(e.jdevice.which);
+                continue;
+            }
+            if(e.type==SDL_JOYDEVICEREMOVED && joy_ptr && *joy_ptr &&
+               SDL_JoystickInstanceID(*joy_ptr)==e.jdevice.which){
+                SDL_JoystickClose(*joy_ptr);
+                *joy_ptr=NULL;
+                continue;
+            }
+            if(e.type==SDL_TEXTINPUT){
+                utf8_append_str(buf,sizeof(buf)<size?sizeof(buf):size,e.text.text);
+                continue;
+            }
+            int key=-1;
+            if(e.type==SDL_CONTROLLERBUTTONDOWN)key=native_button(e.cbutton.button);
+            else if(e.type==SDL_JOYBUTTONDOWN)key=trimui_joy_button(e.jbutton.button);
+            else if(e.type==SDL_JOYHATMOTION){
+                int hb=hat_to_button(e.jhat.value);
+                int hk=hat_to_key(e.jhat.value);
+                if(hk!=hat_k){
+                    hat_k=hk;
+                    hat_press_t=hat_rep_t=SDL_GetTicks();
+                    if(hb>=0)key=hb;
+                }
+            }else if(e.type==SDL_KEYDOWN){
+                switch(e.key.keysym.sym){
+                    case SDLK_UP:key=SDL_CONTROLLER_BUTTON_DPAD_UP;break;
+                    case SDLK_DOWN:key=SDL_CONTROLLER_BUTTON_DPAD_DOWN;break;
+                    case SDLK_LEFT:key=SDL_CONTROLLER_BUTTON_DPAD_LEFT;break;
+                    case SDLK_RIGHT:key=SDL_CONTROLLER_BUTTON_DPAD_RIGHT;break;
+                    case SDLK_RETURN:key=SDL_CONTROLLER_BUTTON_START;break;
+                    case SDLK_BACKSPACE:utf8_pop_char(buf);continue;
+                    case SDLK_SPACE:utf8_append_str(buf,sizeof(buf)<size?sizeof(buf):size," ");continue;
+                    case SDLK_ESCAPE:done=1;accepted=0;break;
+                    case SDLK_TAB:lang_en=!lang_en;continue;
+                }
+            }
+            if(key<0)continue;
+            if(key==SDL_CONTROLLER_BUTTON_B){
+                done=1;accepted=0;break;
+            }else if(key==SDL_CONTROLLER_BUTTON_X || key==SDL_CONTROLLER_BUTTON_LEFTSHOULDER){
+                utf8_pop_char(buf);
+            }else if(key==SDL_CONTROLLER_BUTTON_RIGHTSHOULDER){
+                utf8_append_str(buf,sizeof(buf)<size?sizeof(buf):size," ");
+            }else if(key==SDL_CONTROLLER_BUTTON_Y || key==SDL_CONTROLLER_BUTTON_BACK){
+                lang_en=!lang_en;
+            }else if(key==SDL_CONTROLLER_BUTTON_START){
+                if(buf[0]){done=1;accepted=1;break;}
+            }else if(key==SDL_CONTROLLER_BUTTON_DPAD_UP){
+                if(row==4){
+                    static const int action_to_col[5]={1,4,6,8,10};
+                    col=action_to_col[action_col];
+                    row=3;
+                }else if(row>0)row--;
+            }else if(key==SDL_CONTROLLER_BUTTON_DPAD_DOWN){
+                if(row<3)row++;
+                else if(row==3){
+                    action_col=col<=1?0:col<=4?1:col<=6?2:col<=8?3:4;
+                    row=4;
+                }
+            }else if(key==SDL_CONTROLLER_BUTTON_DPAD_LEFT){
+                if(row==4)action_col=(action_col+4)%5;
+                else col=(col+10)%11;
+            }else if(key==SDL_CONTROLLER_BUTTON_DPAD_RIGHT){
+                if(row==4)action_col=(action_col+1)%5;
+                else col=(col+1)%11;
+            }else if(key==SDL_CONTROLLER_BUTTON_A){
+                if(row<4){
+                    const char *ch=lang_en?en_rows[row][col]:uk_rows[row][col];
+                    utf8_append_str(buf,sizeof(buf)<size?sizeof(buf):size,ch);
+                }else{
+                    if(action_col==0)lang_en=!lang_en;
+                    else if(action_col==1)utf8_append_str(buf,sizeof(buf)<size?sizeof(buf):size," ");
+                    else if(action_col==2)utf8_pop_char(buf);
+                    else if(action_col==3)buf[0]=0;
+                    else if(action_col==4 && buf[0]){done=1;accepted=1;break;}
+                }
+            }
+        }
+        glViewport(0,0,fb_w,fb_h);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+        ui_theme_enabled=1;
+        ui_gradient_pass=1;
+        box_alpha(p,0,0,ui_w,ui_h,.034f,.042f,.054f,1.f,0);
+        ui_gradient_pass=0;
+        screen_header(p,TR("Пошук у каталозі","Catalog search"),lang_en?"ENG":"УКР");
+
+        int pad_x=UI_COMPACT?48:116;
+        int panel_w=ui_w-2*pad_x;
+        int input_y=114,input_h=62;
+        box_alpha(p,pad_x,input_y,panel_w,input_h,.11f,.14f,.18f,1.f,16);
+        search_icon(p,pad_x+30,input_y+29,.11f,.14f,.18f);
+        if(buf[0]){
+            char display[200];
+            snprintf(display,sizeof(display),"%s%s",buf,(frame_t/500)%2?"":"_");
+            text(p,display,pad_x+62,input_y+(input_h-text_height(p,display,p->font))/2,panel_w-84);
+        }else{
+            text_muted(p,TR("Введіть назву фільму, серіалу або аніме…","Enter a movie, TV show, or anime title…"),
+                       pad_x+62,input_y+(input_h-text_height(p,"A",p->font_small))/2,panel_w-84);
+        }
+
+        int gap=UI_COMPACT?8:10;
+        int key_w=(panel_w-10*gap)/11;
+        int grid_w=11*key_w+10*gap;
+        int start_x=(ui_w-grid_w)/2;
+        int start_y=198,key_h=64,row_step=74;
+        for(int r=0;r<4;r++){
+            for(int c=0;c<11;c++){
+                int kx=start_x+c*(key_w+gap);
+                int ky=start_y+r*row_step;
+                int sel=(row==r && col==c);
+                const char *ch=lang_en?en_rows[r][c]:uk_rows[r][c];
+                box_alpha(p,kx,ky,key_w,key_h,
+                          sel?.22f:.10f,sel?.31f:.13f,sel?.40f:.16f,1.f,14);
+                if(sel)selection_frame(p,kx,ky,key_w,key_h);
+                text_center_button(p,ch,kx,ky,key_w,key_h,p->font,.96f,.97f,.99f);
+            }
+        }
+        static const int spans[5]={2,3,2,2,2};
+        const char *act_labels[5]={
+            lang_en?"УКР":"ENG",
+            TR("Пробіл","Space"),
+            TR("⌫ Стерти","⌫ Back"),
+            TR("Очистити","Clear"),
+            TR("Пошук ↵","Search ↵")
+        };
+        int col_cursor=0,ay=start_y+4*row_step+6;
+        for(int a=0;a<5;a++){
+            int ax=start_x+col_cursor*(key_w+gap);
+            int aw=spans[a]*key_w+(spans[a]-1)*gap;
+            int sel=(row==4 && action_col==a);
+            if(sel)selection_frame(p,ax,ay,aw,key_h);
+            button(p,act_labels[a],ax,ay,aw,key_h,a==4 && buf[0]);
+            col_cursor+=spans[a];
+        }
+
+        int ftop=UI_FOOTER_TOP;
+        box_alpha(p,0,ftop,ui_w,ui_h-ftop,.047f,.057f,.070f,1.f,0);
+        box_alpha(p,UI_EDGE,ftop,UI_CONTENT_W,2,.62f,.64f,.66f,.78f,0);
+        text_muted(p,TR("A: Ввід   X: Стерти   R: Пробіл   Y: УКР/ENG   START: Пошук   B: Назад",
+                        "A: Type   X: Delete   R: Space   Y: УКР/ENG   START: Search   B: Cancel"),
+                   UI_EDGE+10,ftop+14,UI_CONTENT_W-20);
+
+        SDL_GL_SwapWindow(window);
+        Uint32 elapsed=SDL_GetTicks()-frame_t;
+        if(elapsed<16u)SDL_Delay(16u-elapsed);
+    }
+    SDL_StopTextInput();
+    if(accepted && buf[0]){
+        snprintf(value,size,"%s",buf);
+        return 1;
+    }
+    return 0;
+}
+#endif
 int main(void) {
+#ifdef __SWITCH__
     romfsInit();
+#endif
+    uaplay_ensure_data_dirs();
     library_init();
     theme_load();
+#ifdef __SWITCH__
     Result network_result = socketInitializeDefault();
     if (R_SUCCEEDED(network_result)) curl_global_init(CURL_GLOBAL_DEFAULT);
+#else
+    int network_ready = (curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK);
+#endif
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS,"1");
-    if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER)) return 1;
+    if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_JOYSTICK|SDL_INIT_GAMECONTROLLER)) return 1;
+#ifdef __SWITCH__
     battery_service_ready=R_SUCCEEDED(psmInitialize());
+#elif defined(__TRIMUI__)
+    battery_service_ready=1;
+    {
+        const char *dev=getenv("DEVICE");
+        if(dev && !strcmp(dev,"smartpro")){
+            ui_w=1280;ui_h=720;
+        }else{
+            SDL_DisplayMode dm={0};
+            if(SDL_GetCurrentDisplayMode(0,&dm)==0 && dm.w>=640 && dm.h>=480){
+                ui_w=dm.w;ui_h=dm.h;
+            }else{
+                ui_w=1024;ui_h=768;
+            }
+        }
+        fb_w=ui_w;fb_h=ui_h;
+    }
+#endif
     battery_status_poll();
     catalog_http_init();
     downloads_init();
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,0);
-    SDL_Window *window=SDL_CreateWindow("UAPlay",0,0,1280,720,SDL_WINDOW_OPENGL|SDL_WINDOW_SHOWN);
+    SDL_Window *window=SDL_CreateWindow("UAPlay",0,0,ui_w,ui_h,SDL_WINDOW_OPENGL|SDL_WINDOW_SHOWN);
     if(!window) { SDL_Quit();return 2; }
     SDL_GLContext gl=SDL_GL_CreateContext(window);
+    if(!gl){
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,0);
+        gl=SDL_GL_CreateContext(window);
+    }
     if(!gl) { SDL_DestroyWindow(window);SDL_Quit();return 3; }
+    SDL_GL_GetDrawableSize(window,&fb_w,&fb_h);
+    if(fb_w<=0 || fb_h<=0){fb_w=ui_w;fb_h=ui_h;}
     Paint paint={0};
     if(!paint_init(&paint)) goto cleanup;
     posters_init();
     SDL_GameController *pad=NULL;
+    SDL_Joystick *joy=NULL;
+#ifdef __TRIMUI__
+    if(SDL_NumJoysticks()>0)joy=SDL_JoystickOpen(0);
+#else
     for(int i=0;i<SDL_NumJoysticks();i++)
         if(SDL_IsGameController(i)){pad=SDL_GameControllerOpen(i);break;}
+    if(!pad && SDL_NumJoysticks()>0)joy=SDL_JoystickOpen(0);
+#endif
     mpv_handle *player=mpv_create();
     mpv_render_context *render=NULL;
     if(player){
         mpv_set_option_string(player,"vo","libmpv");
         mpv_set_option_string(player,"hwdec","auto-safe");
+#ifdef __TRIMUI__
+        mpv_set_option_string(player,"ao","alsa,sdl");
+        mpv_set_option_string(player,"vd-lavc-threads","4");
+        mpv_set_option_string(player,"opengl-es","yes");
+#endif
         mpv_set_option_string(player,"terminal","no");
         mpv_set_option_string(player,"network-timeout","20");
         mpv_set_option_string(player,"sub-visibility","yes");
@@ -2312,9 +2762,11 @@ int main(void) {
     Uint32 controls_until=0;
     int pending_next_episode=-1,next_episode_request=-1;
     Uint32 next_episode_countdown_at=0;
-    Uint32 stick_last_time=0;
-    int stick_last_key=0;
+    Uint32 stick_last_time=0,hat_pressed_at=0,hat_last_time=0;
+    int stick_last_key=0,hat_last_key=0,l2_down=0,r2_down=0;
+#ifdef __SWITCH__
     int media_playback_mode=0;
+#endif
     int catalog_language_changed=0;
     TouchGesture touch={0};
     ui_touch=&touch;
@@ -2323,7 +2775,8 @@ int main(void) {
     static DownloadInfo download_rows[DOWNLOADS_MAX];
     while(running){
         Uint32 frame_started_at=SDL_GetTicks();
-        stick_arrow(pad,&stick_last_time,&stick_last_key);
+        stick_arrow(pad,joy,&stick_last_time,&stick_last_key,
+                    &hat_pressed_at,&hat_last_time,&hat_last_key,&l2_down,&r2_down);
         SDL_Event e;
         for(;;){
             int replay=pending_key>=0;
@@ -2332,9 +2785,29 @@ int main(void) {
                 e=(SDL_Event){0};
             }else if(!SDL_PollEvent(&e))break;
             if(e.type==SDL_QUIT)running=0;
+            if(e.type==SDL_JOYDEVICEADDED && !joy && !pad){
+                joy=SDL_JoystickOpen(e.jdevice.which);
+                continue;
+            }
+            if(e.type==SDL_JOYDEVICEREMOVED && joy &&
+               SDL_JoystickInstanceID(joy)==e.jdevice.which){
+                SDL_JoystickClose(joy);
+                joy=NULL;
+                continue;
+            }
             int key=replay && pending_key_page==page?pending_key:-1;
             pending_key=-1;
-            if(e.type==SDL_CONTROLLERBUTTONDOWN)key=native_button(e.cbutton.button);
+            if(e.type==SDL_CONTROLLERBUTTONDOWN && pad)key=native_button(e.cbutton.button);
+            else if(e.type==SDL_JOYBUTTONDOWN && !pad)key=trimui_joy_button(e.jbutton.button);
+            else if(e.type==SDL_JOYHATMOTION && !pad){
+                int hb=hat_to_button(e.jhat.value);
+                int hk=hat_to_key(e.jhat.value);
+                if(hk!=hat_last_key){
+                    hat_last_key=hk;
+                    hat_pressed_at=hat_last_time=SDL_GetTicks();
+                    if(hb>=0)key=hb;
+                }
+            }
             if(e.type==SDL_KEYDOWN){
                 switch(e.key.keysym.sym){
                     case SDLK_RETURN:key=SDL_CONTROLLER_BUTTON_A;break;
@@ -2355,7 +2828,7 @@ int main(void) {
                 touch.active=0;
             int tx=-1,ty=-1;
             if(e.type==SDL_FINGERDOWN || e.type==SDL_FINGERMOTION || e.type==SDL_FINGERUP){
-                int x=(int)(e.tfinger.x*1280),y=(int)(e.tfinger.y*720);
+                int x=(int)(e.tfinger.x*ui_w),y=(int)(e.tfinger.y*ui_h);
                 if(page==PLAYER){
                     if(e.type==SDL_FINGERDOWN ||
                        (e.type==SDL_FINGERMOTION && video_loaded && SDL_GetTicks()<controls_until)){
@@ -2366,7 +2839,7 @@ int main(void) {
                     TouchAction action=touch_gesture(&touch,&e.tfinger,page,x,y);
                     if(action==TOUCH_TAP){
                         tx=touch.x;ty=touch.y;
-                    }else if(action!=TOUCH_NONE && touch.x>=UI_EDGE && touch.x<1280-UI_EDGE){
+                    }else if(action!=TOUCH_NONE && touch.x>=UI_EDGE && touch.x<ui_w-UI_EDGE){
                         int vertical=action==SWIPE_UP || action==SWIPE_DOWN;
                         int direction=action==SWIPE_LEFT || action==SWIPE_UP?1:-1;
                         if(page==CATALOG){
@@ -2431,18 +2904,18 @@ int main(void) {
             }else if(e.type==SDL_MOUSEBUTTONDOWN &&
                      e.button.button==SDL_BUTTON_LEFT && e.button.which!=SDL_TOUCH_MOUSEID){
                 touch.active=0;
-                int ww=1280,hh=720;
+                int ww=ui_w,hh=ui_h;
                 SDL_GetWindowSize(window,&ww,&hh);
-                tx=e.button.x*1280/(ww?ww:1280);
-                ty=e.button.y*720/(hh?hh:720);
+                tx=e.button.x*ui_w/(ww?ww:ui_w);
+                ty=e.button.y*ui_h/(hh?hh:ui_h);
             }else if(page==PLAYER && e.type==SDL_MOUSEMOTION &&
                      e.motion.which!=SDL_TOUCH_MOUSEID &&
                      (e.motion.state&SDL_BUTTON_LMASK) && video_loaded &&
                      SDL_GetTicks()<controls_until){
-                int ww=1280,hh=720;
+                int ww=ui_w,hh=ui_h;
                 SDL_GetWindowSize(window,&ww,&hh);
-                tx=e.motion.x*1280/(ww?ww:1280);
-                ty=e.motion.y*720/(hh?hh:720);
+                tx=e.motion.x*ui_w/(ww?ww:ui_w);
+                ty=e.motion.y*ui_h/(hh?hh:ui_h);
             }
             if(tx>=0 && ty>=0){
                 if(page!=PLAYER){
@@ -2729,9 +3202,12 @@ int main(void) {
                    active_episode_variant>=0 && player_return_page==EPISODES)
                     next_episode_request=catalog_next_episode(
                         episodes,episode_count,active_episode_variant);
-                if(key==SDL_CONTROLLER_BUTTON_A)command(player,"cycle","pause");
-                int fast=pad && SDL_GameControllerGetAttached(pad) &&
-                    SDL_GameControllerGetButton(pad,SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+                if(key==SDL_CONTROLLER_BUTTON_A || key==SDL_CONTROLLER_BUTTON_START)
+                    command(player,"cycle","pause");
+                int fast=(pad && SDL_GameControllerGetAttached(pad) &&
+                          SDL_GameControllerGetButton(pad,SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) ||
+                         (joy && SDL_JoystickGetAttached(joy) &&
+                          (SDL_JoystickGetButton(joy,5) || r2_down));
                 if(key==SDL_CONTROLLER_BUTTON_DPAD_LEFT || key==SDL_CONTROLLER_BUTTON_DPAD_RIGHT){
                     int direction=key==SDL_CONTROLLER_BUTTON_DPAD_RIGHT?1:-1;
                     if(movy_stream_url(playing_url)){
@@ -3092,6 +3568,11 @@ int main(void) {
                                      TR("Не вдалося зберегти мову на SD-карті",
                                         "Could not save the language to the SD card"));
                     }
+#ifdef __TRIMUI__
+                    else if(settings_selected==SETTING_EXIT){
+                        running=0;
+                    }
+#endif
                 }
                 continue;
             }
@@ -3150,10 +3631,11 @@ int main(void) {
                    catalog_hero_focus==0 &&
                    (key==SDL_CONTROLLER_BUTTON_DPAD_UP ||
                     key==SDL_CONTROLLER_BUTTON_DPAD_DOWN)){
-                    if(key==SDL_CONTROLLER_BUTTON_DPAD_UP && n>5 && chosen>=5){
+                    if(key==SDL_CONTROLLER_BUTTON_DPAD_UP && n>POSTER_COLUMNS-1 &&
+                       chosen>=POSTER_COLUMNS-1){
                         /* The rightmost visible poster points to More. The
                            horizontal row shifts once the selection reaches
-                           its sixth card, keeping that card on the right. */
+                           its last visible card, keeping that card on the right. */
                         catalog_hero_focus=3;
                         continue;
                     }
@@ -3198,11 +3680,11 @@ int main(void) {
                         if(key==SDL_CONTROLLER_BUTTON_DPAD_LEFT && chosen>0)chosen--;
                         if(key==SDL_CONTROLLER_BUTTON_DPAD_RIGHT && chosen<n-1)chosen++;
                         if(key==SDL_CONTROLLER_BUTTON_DPAD_UP){
-                            if(chosen>=6)chosen-=6;
+                            if(chosen>=POSTER_COLUMNS)chosen-=POSTER_COLUMNS;
                             else catalog_hero_focus=focused_subsection(category);
                         }
                         if(key==SDL_CONTROLLER_BUTTON_DPAD_DOWN){
-                            if(chosen+6<n)chosen+=6;
+                            if(chosen+POSTER_COLUMNS<n)chosen+=POSTER_COLUMNS;
                             else if(!n)catalog_hero_focus=focused_subsection(category);
                         }
                     }
@@ -3258,15 +3740,16 @@ int main(void) {
                         }else if(expanded_catalog && category!=0 &&
                                  chosen%GRID_ITEMS<POSTER_COLUMNS){
                             catalog_hero_focus=12+sort_button_for_mode(catalog_sort_mode);
-                        }else if(!expanded_catalog && n>5 &&
-                           (category==0 && !query[0] ? chosen>=5 : chosen%6==5))
+                        }else if(!expanded_catalog && n>POSTER_COLUMNS-1 &&
+                           (category==0 && !query[0] ? chosen>=POSTER_COLUMNS-1 :
+                            chosen%POSTER_COLUMNS==POSTER_COLUMNS-1))
                             catalog_hero_focus=3; /* Up from rightmost poster. */
-                        else if(chosen>=6)chosen-=6;
+                        else if(chosen>=POSTER_COLUMNS)chosen-=POSTER_COLUMNS;
                         else if(expanded_catalog)
                             catalog_hero_focus=12+sort_button_for_mode(catalog_sort_mode);
                         else if(!n)catalog_hero_focus=7+tab_for_category(category);
                         else catalog_hero_focus=subsection_count(category)?
-                            focused_subsection(category):(chosen%6>=4?3:1);
+                            focused_subsection(category):(chosen%POSTER_COLUMNS>=POSTER_COLUMNS-2?3:1);
                     }
                     if(key==SDL_CONTROLLER_BUTTON_DPAD_DOWN &&
                        (expanded_catalog || category==0) && chosen+POSTER_COLUMNS<n)
@@ -3347,7 +3830,8 @@ int main(void) {
                 }
                 if(key==SDL_CONTROLLER_BUTTON_X){
                     char new_query[192]={0};
-                    if(keyboard(new_query,sizeof(new_query))){
+                    snprintf(new_query,sizeof(new_query),"%s",query);
+                    if(keyboard(&paint,window,pad,&joy,new_query,sizeof(new_query))){
                         if(!query[0]){
                             search_return_category=category;
                             search_return_expanded=expanded_catalog;
@@ -3657,10 +4141,12 @@ int main(void) {
         int watching_video=(page==PLAYER || page==TRACK_PICKER || page==SUBDL_PICKER ||
                             (page==VIDEO_SETTINGS && !video_settings_from_menu));
         downloads_pause(watching_video);
+#ifdef __SWITCH__
         if(watching_video!=media_playback_mode){
             appletSetMediaPlaybackState(watching_video!=0);
             media_playback_mode=watching_video;
         }
+#endif
         battery_status_poll();
         ui_now=SDL_GetTicks();
         ui_draw_page=page;
@@ -3680,7 +4166,7 @@ int main(void) {
         }
         if(page==PLAYER && render){
             ui_theme_enabled=0;
-            mpv_opengl_fbo fbo={.fbo=0,.w=1280,.h=720};int flip=1;
+            mpv_opengl_fbo fbo={.fbo=0,.w=fb_w,.h=fb_h};int flip=1;
             mpv_render_param frame[]={{MPV_RENDER_PARAM_OPENGL_FBO,&fbo},
                                       {MPV_RENDER_PARAM_FLIP_Y,&flip},
                                       {MPV_RENDER_PARAM_INVALID,NULL}};
@@ -3689,7 +4175,7 @@ int main(void) {
                scissor, blend factors). Without restoring it, transparent
                text glyphs may render as solid white rectangles in Eden. */
             glBindFramebuffer(GL_FRAMEBUFFER,0);
-            glViewport(0,0,1280,720);
+            glViewport(0,0,fb_w,fb_h);
             glDisable(GL_SCISSOR_TEST);
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_CULL_FACE);
@@ -3698,22 +4184,22 @@ int main(void) {
             glBlendEquation(GL_FUNC_ADD);
             glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
             if(!video_loaded){
-                box(&paint,0,0,1280,720,.035f,.044f,.059f);
-                box_alpha(&paint,35,33,168,53,.10f,.15f,.22f,.95f,14);
-                text(&paint,TR("‹  Назад","‹  Back"),54,44,141);
-                const int loading_center_x=640;
+                box(&paint,0,0,ui_w,ui_h,.035f,.044f,.059f);
+                box_alpha(&paint,UI_EDGE+3,33,168,53,.10f,.15f,.22f,.95f,14);
+                text(&paint,TR("‹  Назад","‹  Back"),UI_EDGE+22,44,141);
+                const int loading_center_x=ui_w/2,loading_center_y=ui_h/2-20;
                 Uint32 tick=SDL_GetTicks()/90;
                 for(int i=0;i<12;i++){
                     const float sx[]={0,.5f,.866f,1,.866f,.5f,0,-.5f,-.866f,-1,-.866f,-.5f};
                     const float sy[]={-1,-.866f,-.5f,0,.5f,.866f,1,.866f,.5f,0,-.5f,-.866f};
                     int age=(i+12-(tick%12))%12;
                     float bright=.22f+(12-age)*.047f;
-                    box_alpha(&paint,loading_center_x+(int)(sx[i]*42)-6,340+(int)(sy[i]*42)-6,
+                    box_alpha(&paint,loading_center_x+(int)(sx[i]*42)-6,loading_center_y+(int)(sy[i]*42)-6,
                               13,13,bright,bright,bright,1.f,6);
                 }
                 text_center(&paint,movy.seek_started?TR("Перемотування…","Seeking…"):
                             TR("Завантаження відео","Loading video"),
-                            loading_center_x-310,426,620,paint.font,.76f,.78f,.82f);
+                            loading_center_x-310,loading_center_y+86,620,paint.font,.76f,.78f,.82f);
                 unsigned timeout=movy_stream_url(playing_url)?60000u:30000u;
                 if(!movy.seek_started && video_started_at && SDL_GetTicks()-video_started_at>timeout &&
                    !retry_movy(player,&movy,playing_url,0,&resume_at,&video_started_at)){
@@ -3728,10 +4214,10 @@ int main(void) {
                show and hide both at the same time while playing. */
             if(video_loaded && movy.seek_started && SDL_GetTicks()-movy.seek_started>600u)
                 text_center(&paint,TR("Перемотування…","Seeking…"),
-                            330,342,620,paint.font,.92f,.94f,.98f);
+                            ui_w/2-310,ui_h/2-18,620,paint.font,.92f,.94f,.98f);
             if(video_loaded && SDL_GetTicks()<controls_until){
                 draw_player_controls(&paint,player,movy.offset);
-                battery_status_horizontal(&paint,1187,28);
+                battery_status_horizontal(&paint,ui_w-93,28);
             }
             if(pending_next_episode>=0){
                 Uint32 elapsed=SDL_GetTicks()-next_episode_countdown_at;
@@ -3756,10 +4242,10 @@ int main(void) {
             }
             draw(&paint,page,movies,n,chosen,sources,sn,source,heading,message);
             if(page==CATALOG && n>0){
-                int start=expanded_catalog?(chosen/12)*12:
-                          category==0 && !query[0] && chosen>=5?chosen-5:
-                          (chosen/6)*6;
-                posters_prefetch(movies,n,start,expanded_catalog?18:12);
+                int start=expanded_catalog?(chosen/GRID_ITEMS)*GRID_ITEMS:
+                          category==0 && !query[0] && chosen>=POSTER_COLUMNS-1?chosen-(POSTER_COLUMNS-1):
+                          (chosen/POSTER_COLUMNS)*POSTER_COLUMNS;
+                posters_prefetch(movies,n,start,expanded_catalog?3*POSTER_COLUMNS:2*POSTER_COLUMNS);
             }
         }
         SDL_GL_SwapWindow(window);
@@ -3769,7 +4255,9 @@ int main(void) {
         Uint32 frame_budget=page==PLAYER || ui_animating || pending_key>=0?16u:33u;
         if(frame_elapsed<frame_budget)SDL_Delay(frame_budget-frame_elapsed);
     }
+#ifdef __SWITCH__
     if(media_playback_mode)appletSetMediaPlaybackState(false);
+#endif
     if(subdl_job.thread)SDL_WaitThread(subdl_job.thread,NULL);
     downloads_shutdown();
     catalog_loader_shutdown();
@@ -3778,6 +4266,7 @@ int main(void) {
     if(player)mpv_terminate_destroy(player);
     movy_stream_close();
     if(pad)SDL_GameControllerClose(pad);
+    if(joy)SDL_JoystickClose(joy);
     posters_destroy();
     catalog_http_cleanup();
     text_cache_destroy();
@@ -3799,7 +4288,13 @@ int main(void) {
     glDeleteProgram(paint.program);
 cleanup:
     SDL_GL_DeleteContext(gl);
-    SDL_DestroyWindow(window);SDL_Quit();if(battery_service_ready)psmExit();romfsExit();
+    SDL_DestroyWindow(window);SDL_Quit();
+#ifdef __SWITCH__
+    if(battery_service_ready)psmExit();
+    romfsExit();
     if (R_SUCCEEDED(network_result)) { curl_global_cleanup(); socketExit(); }
+#else
+    if (network_ready) curl_global_cleanup();
+#endif
     return 0;
 }
